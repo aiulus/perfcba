@@ -16,7 +16,7 @@ from __future__ import annotations
 import collections
 import math
 import random
-from typing import Any, Callable, Dict, Iterable, List, MutableMapping, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, MutableMapping, Sequence, Tuple, Union
 
 
 __all__ = [
@@ -69,7 +69,7 @@ def parallel_bandit_algorithm(
     N: int,
     env_pull_do_empty: Callable[[], Tuple[Sequence[int], int]],
     env_pull_do_single: Callable[[int, int], int],
-) -> Tuple[Tuple[int, int], Dict[Tuple[int, int], float]]:
+)  -> Tuple[Union[str, Tuple[int, int]], Dict[Tuple[int, int], float]]:
     """Implementation of Algorithm 1 (Parallel Bandit) from LLR16.
 
     Parameters
@@ -88,7 +88,8 @@ def parallel_bandit_algorithm(
     Returns
     -------
     best_arm:
-        Tuple ``(i, j)`` describing the recommended intervention.
+        Either the string ``"do()"`` for the empty intervention or the tuple
+        ``(i, j)`` describing the recommended single-variable intervention.
     mu_hat:
         Dictionary of empirical means for each single-variable intervention.
 
@@ -110,12 +111,14 @@ def parallel_bandit_algorithm(
 
     count_a: Dict[Tuple[int, int], int] = {(i, j): 0 for i in range(N) for j in (0, 1)}
     sumY_a: Dict[Tuple[int, int], float] = {(i, j): 0.0 for i in range(N) for j in (0, 1)}
+    baseline_sum = 0.0
 
     # Phase 1: draw T_obs samples under do() and reuse occurrences of X_i=j
     for _ in range(T_obs):
         x, y = env_pull_do_empty()
         if len(x) != N:
             raise ValueError("env_pull_do_empty returned a vector of unexpected length")
+        baseline_sum += y
         for i in range(N):
             j = x[i]
             if j not in (0, 1):
@@ -146,26 +149,33 @@ def parallel_bandit_algorithm(
 
     # Phase 2: targeted sampling of rare arms (Algorithm 1, lines 10-14)
     if rare_arms:
-        allocations = max(1, len(rare_arms))
-        T_per_arm = T_tar // allocations
+        base_alloc = T_tar // len(rare_arms)
+        remainder = T_tar % len(rare_arms)
     else:
-        T_per_arm = 0
+        base_alloc = 0
+        remainder = 0
 
-    for i, j in rare_arms:
-        if T_per_arm == 0:
-            break
+    for index, (i, j) in enumerate(rare_arms):
+        pulls = base_alloc + (1 if index < remainder else 0)
+        if pulls <= 0:
+            continue
         total = 0.0
-        for _ in range(T_per_arm):
+        for _ in range(pulls):
             y = env_pull_do_single(i, j)
             total += y
-        mu_hat[(i, j)] = total / T_per_arm if T_per_arm > 0 else mu_hat[(i, j)]
+        mu_hat[(i, j)] = total / pulls
 
-    # Recommend the best single-variable arm according to empirical mean
-    def value(item: Tuple[Tuple[int, int], float]) -> float:
-        _, mean = item
-        return mean if not math.isnan(mean) else float("-inf")
+    mu_hat_do = baseline_sum / T_obs if T_obs > 0 else math.nan
 
-    best_arm = max(mu_hat.items(), key=value)[0]
+    best_arm: Union[str, Tuple[int, int]] = "do()"
+    best_val = mu_hat_do if not math.isnan(mu_hat_do) else float("-inf")
+
+    for arm, mean in mu_hat.items():
+        value = mean if not math.isnan(mean) else float("-inf")
+        if value > best_val:
+            best_val = value
+            best_arm = arm
+
     return best_arm, mu_hat
 
 

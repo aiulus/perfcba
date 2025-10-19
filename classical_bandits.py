@@ -8,6 +8,35 @@ import numpy as np
 from Algorithm import BasePolicy, History
 
 
+class RandomPolicy(BasePolicy):
+    """Policy that selects an action uniformly at random each round."""
+
+    name = "random"
+
+    def __init__(self, seed: Optional[int] = None) -> None:
+        self._seed = seed
+        self._rng = random.Random(seed)
+        self.n_arms: int = 0
+
+    def reset(self, n_arms: int, horizon: Optional[int] = None, **_: object) -> None:
+        del horizon
+        self.n_arms = int(n_arms)
+        if self.n_arms <= 0:
+            raise ValueError("Number of arms must be positive")
+        # Recreate RNG to provide deterministic behaviour across resets when seeded.
+        self._rng = random.Random(self._seed)
+
+    def choose(self, t: int, history: History) -> int:
+        del t, history
+        return self._rng.randrange(self.n_arms)
+
+    def update(self, t: int, a: int, x: float) -> None:
+        del t, a, x  # Random policy is memoryless.
+
+    def get_params(self) -> dict:
+        return {"seed": self._seed}
+
+
 class ExploreThenCommit(BasePolicy):
     """
     ETC with exploration fraction tau in (0,1].
