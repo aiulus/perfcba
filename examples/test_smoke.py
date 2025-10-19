@@ -1,7 +1,7 @@
-from perfcba.SCM import LinearGaussianSCM, Intervention
-from perfcba.Bandit import SCMBandit
-from perfcba.Experiment import Experiment, RunConfig
-from perfcba.classical_bandits import ExploreThenCommit
+from SCM import LinearGaussianSCM, Intervention
+from Bandit import SCMBandit
+from Experiment import Experiment, RunConfig
+from classical_bandits import ExploreThenCommit
 import numpy as np
 
 nodes = ["X", "Y"]
@@ -19,4 +19,4 @@ bandit = SCMBandit(scm, arms, reward_node="Y", observe="parents", feedback="caus
 policy = ExploreThenCommit(tau=0.3)
 hist = Experiment(bandit, policy, RunConfig(T=500, seed=123)).run()
 
-# Now Profiler can compute regret etc. using exact μ(Y|do(X)).
+# Now Profiler can compute regret etc. using exact mu(Y|do(X)).
