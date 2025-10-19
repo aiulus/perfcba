@@ -396,3 +396,745 @@ def approx_minimize_m_eta(
         eta = _project_to_simplex(eta)
 
     return eta
+
+"""Implementations of causal bandit utilities from Lee & Bareinboim (2018).
+
+The functions in this module follow the pseudocode specification provided in the
+prompt.  They offer a direct translation of the structural causal bandit
+algorithms into executable Python that interoperates with the rest of the
+repository.  The implementation intentionally mirrors the notation used in the
+paper so that it stays close to the theory while remaining practical.
+"""
+from typing import Callable, Dict, FrozenSet, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
+
+import itertools
+import math
+import numbers
+import numpy as np
+
+
+# ---------------------------------------------------------------------------
+# Helper utilities
+# ---------------------------------------------------------------------------
+
+def _node_set(graph) -> Set[str]:
+    """Return the set of node names for *graph*.
+
+    The helper is defensive: depending on the underlying graph class the node
+    container might live under ``V``, ``nodes`` or ``vertices`` (either as an
+    attribute or a method).  The causal bandit routines only rely on the node
+    *names*, so converting to a ``set`` keeps downstream code simple.
+    """
+
+    for attr in ("V", "nodes", "vertices"):
+        if hasattr(graph, attr):
+            value = getattr(graph, attr)
+            value = value() if callable(value) else value
+            if value is not None:
+                return set(value)
+    raise AttributeError("Graph object does not expose a node container (V/nodes/vertices).")
+
+
+def _filter_sequence(seq: Sequence[str], allowed: Iterable[str]) -> List[str]:
+    """Filter ``seq`` to values that appear in ``allowed`` while preserving order."""
+
+    allowed_set = set(allowed)
+    return [x for x in seq if x in allowed_set]
+
+
+def _ensure_frozenset(items: Iterable[str]) -> FrozenSet[str]:
+    return frozenset(set(items))
+
+
+def rand_argmax(values: Sequence[float]) -> int:
+    """Return the index of a maximal entry chosen uniformly at random."""
+
+    array = np.asarray(values, dtype=float)
+    if array.size == 0:
+        raise ValueError("Cannot take argmax of an empty sequence.")
+    max_val = np.nanmax(array)
+    max_mask = np.isclose(array, max_val, rtol=1e-12, atol=1e-12)
+    idxs = np.flatnonzero(max_mask)
+    if idxs.size == 1:
+        return int(idxs[0])
+    return int(np.random.default_rng().choice(idxs))
+
+
+# ---------------------------------------------------------------------------
+# Minimal intervention sets (MISs)
+# ---------------------------------------------------------------------------
+
+def MISs(graph, outcome: str) -> FrozenSet[FrozenSet[str]]:
+    """Enumerate all minimal intervention sets (MISs) for ``outcome``.
+
+    Parameters
+    ----------
+    graph:
+        A causal diagram exposing the API used throughout the pseudocode
+        (``An``, ``do``, ``causal_order`` and slicing via ``__getitem__``).
+    outcome:
+        Name of the reward node ``Y`` in the paper.
+    """
+
+    ancestors = graph.An(outcome)
+    induced = graph[ancestors]
+    nodes = _node_set(induced)
+    candidate_vars = nodes - {outcome}
+    order = induced.causal_order(backward=True)
+    order = _filter_sequence(order, candidate_vars)
+    results = _subMISs(induced, outcome, frozenset(), order)
+    return frozenset(results)
+
+
+def _subMISs(graph, outcome: str, chosen: FrozenSet[str], remaining: Sequence[str]) -> Set[FrozenSet[str]]:
+    """Recursive helper implementing the MIS enumeration logic."""
+
+    out: Set[FrozenSet[str]] = {chosen}
+    for idx, var in enumerate(remaining):
+        next_graph = graph.do({var})
+        next_graph = next_graph[next_graph.An(outcome)]
+        next_nodes = _node_set(next_graph)
+        new_chosen = _ensure_frozenset(set(chosen) | {var})
+        next_remaining = _filter_sequence(remaining[idx + 1 :], next_nodes)
+        out |= _subMISs(next_graph, outcome, new_chosen, next_remaining)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Minimal unobserved-confounder territory (MUCT) and interventional border (IB)
+# ---------------------------------------------------------------------------
+
+def MUCT(graph, outcome: str) -> FrozenSet[str]:
+    """Compute the minimal unobserved-confounder territory for ``outcome``."""
+
+    induced = graph[graph.An(outcome)]
+    territory: Set[str] = {outcome}
+    frontier: Set[str] = {outcome}
+    while frontier:
+        node = frontier.pop()
+        component = set(induced.c_component(node))
+        new_nodes = component - territory
+        territory |= new_nodes
+        descendants = set(induced.de(set(component)))
+        frontier |= (descendants - territory)
+    return _ensure_frozenset(territory)
+
+
+def IB(graph, outcome: str) -> FrozenSet[str]:
+    """Interventional border for ``outcome`` (parents of its MUCT)."""
+
+    territory = MUCT(graph, outcome)
+    parents = set(graph.pa(set(territory)))
+    return _ensure_frozenset(parents - set(territory))
+
+
+def MUCT_IB(graph, outcome: str) -> Tuple[FrozenSet[str], FrozenSet[str]]:
+    """Return both the MUCT and its border (helper for POMIS enumeration)."""
+
+    territory = MUCT(graph, outcome)
+    border = _ensure_frozenset(set(graph.pa(set(territory))) - set(territory))
+    return territory, border
+
+
+# ---------------------------------------------------------------------------
+# Possibly-optimal MISs (POMISs)
+# ---------------------------------------------------------------------------
+
+def POMISs(graph, outcome: str) -> Set[FrozenSet[str]]:
+    """Enumerate all possibly-optimal minimal intervention sets (POMISs)."""
+
+    induced = graph[graph.An(outcome)]
+    territory, border = MUCT_IB(induced, outcome)
+    result: Set[FrozenSet[str]] = {border}
+    if border:
+        work_graph = induced.do(set(border))
+    else:
+        work_graph = induced
+    slice_nodes = set(territory) | set(border)
+    work_graph = work_graph[slice_nodes]
+    order = work_graph.causal_order(backward=True)
+    order = _filter_sequence(order, set(territory) - {outcome})
+    result |= _subPOMISs(work_graph, outcome, order, obs=set())
+    return { _ensure_frozenset(x) for x in result }
+
+
+def _subPOMISs(graph, outcome: str, ordered_vars: Sequence[str], obs: Set[str]) -> Set[FrozenSet[str]]:
+    """Depth-first generation helper mirroring Algorithm 1 from the paper."""
+
+    if not ordered_vars:
+        return set()
+    out: Set[FrozenSet[str]] = set()
+    for idx, var in enumerate(ordered_vars):
+        territory, border = MUCT_IB(graph.do({var}), outcome)
+        new_obs = obs | set(ordered_vars[:idx])
+        if set(border) & new_obs:
+            continue
+        out.add(border)
+        next_vars = _filter_sequence(ordered_vars[idx + 1 :], territory)
+        if next_vars:
+            next_graph = graph.do(set(border))
+            slice_nodes = set(territory) | set(border)
+            next_graph = next_graph[slice_nodes]
+            out |= _subPOMISs(next_graph, outcome, next_vars, new_obs)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Converting SCMs into bandit machines
+# ---------------------------------------------------------------------------
+
+def SCM_to_bandit_machine(model, outcome: str = "Y") -> Tuple[Tuple[float, ...], Dict[int, Dict[str, numbers.Number]]]:
+    """Enumerate all interventional arms and their expected rewards.
+
+    The routine assumes that ``model`` exposes the following attributes/methods:
+
+    ``model.G``
+        Underlying causal diagram (used purely for arm bookkeeping).
+    ``model.D``
+        Mapping from node -> iterable domain of the node.
+    ``model.query(vars, intervention=dict)``
+        Returns a factor for the joint distribution of ``vars`` under the given
+        hard intervention.  The factor should index outcomes via tuples, e.g.
+        ``factor[(0,)]`` for a single binary variable.
+    """
+
+    graph = model.G
+    nodes = sorted(_node_set(graph) - {outcome})
+    mu_values: List[float] = []
+    arm_settings: Dict[int, Dict[str, numbers.Number]] = {}
+    arm_id = 0
+
+    for r in range(len(nodes) + 1):
+        for subset in itertools.combinations(nodes, r):
+            domains = [model.D[var] for var in subset]
+            for values in itertools.product(*domains) if domains else [()]:
+                intervention = dict(zip(subset, values))
+                dist = model.query((outcome,), intervention=intervention)
+                expectation = 0.0
+                for y_val in model.D[outcome]:
+                    expectation += y_val * float(dist[(y_val,)])
+                mu_values.append(expectation)
+                arm_settings[arm_id] = intervention
+                arm_id += 1
+
+    return tuple(mu_values), arm_settings
+
+
+# ---------------------------------------------------------------------------
+# Arm filters
+# ---------------------------------------------------------------------------
+
+def arms_of(kind: str, arm_settings: Mapping[int, Mapping[str, numbers.Number]], graph, outcome: str) -> Tuple[int, ...]:
+    """Return the arm indices matching ``kind``.
+
+    ``kind`` may be one of ``{"POMIS", "MIS", "Brute-force", "All-at-once"}``.
+    """
+
+    kind = kind.lower()
+    if kind == "pomis":
+        pomis_sets = POMISs(graph, outcome)
+        return tuple(i for i, setting in arm_settings.items() if frozenset(setting.keys()) in pomis_sets)
+    if kind == "mis":
+        mis_sets = MISs(graph, outcome)
+        return tuple(i for i, setting in arm_settings.items() if frozenset(setting.keys()) in mis_sets)
+    if kind == "all-at-once":
+        full = _node_set(graph) - {outcome}
+        return tuple(i for i, setting in arm_settings.items() if set(setting.keys()) == full)
+    if kind == "brute-force":
+        return tuple(sorted(arm_settings.keys()))
+    raise ValueError(f"Unknown arm kind: {kind}")
+
+
+# ---------------------------------------------------------------------------
+# KL-UCB utilities
+# ---------------------------------------------------------------------------
+
+def default_klUCB_exploration(t: int) -> float:
+    """Exploration schedule used by KL-UCB."""
+
+    if t < 3:
+        return 1.0
+    return math.log(t) + 3.0 * math.log(math.log(t))
+
+
+def KL(p: float, q: float, eps: float = 1e-12) -> float:
+    """Bernoulli KL divergence with clamping for numerical stability."""
+
+    p = float(np.clip(p, eps, 1.0 - eps))
+    q = float(np.clip(q, eps, 1.0 - eps))
+    return p * math.log(p / q) + (1.0 - p) * math.log((1.0 - p) / (1.0 - q))
+
+
+def sup_KL(mu_ref: float, divergence: float, lower: Optional[float] = None) -> float:
+    """Compute ``sup_{mu >= mu_ref} { KL(mu_ref, mu) <= divergence }`` via bisection."""
+
+    mu_ref = float(mu_ref)
+    if divergence <= 0.0:
+        return mu_ref
+    if KL(mu_ref, 1.0) <= divergence:
+        return 1.0
+    low = mu_ref if lower is None else float(lower)
+    high = 1.0
+    for _ in range(60):
+        mid = 0.5 * (low + high)
+        if KL(mu_ref, mid) <= divergence:
+            low = mid
+        else:
+            high = mid
+    return low
+
+
+def KL_UCB_run(
+    horizon: int,
+    mu_true: Sequence[float],
+    allowed_arms: Sequence[int],
+    exploration_schedule: Callable[[int], float] = default_klUCB_exploration,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Simulate KL-UCB restricted to ``allowed_arms`` with Bernoulli rewards."""
+
+    mu_true = np.asarray(mu_true, dtype=float)
+    num_arms = mu_true.size
+    allowed = np.asarray(tuple(allowed_arms), dtype=int)
+    if allowed.size == 0:
+        raise ValueError("KL-UCB requires at least one allowed arm.")
+
+    pulls = np.zeros(horizon, dtype=int)
+    rewards = np.zeros(horizon, dtype=float)
+    counts = np.zeros(num_arms, dtype=float)
+    estimates = np.zeros(num_arms, dtype=float)
+
+    rng = np.random.default_rng()
+    warm = min(horizon, allowed.size)
+    for t in range(warm):
+        arm = allowed[t]
+        reward = float(rng.random() <= mu_true[arm])
+        pulls[t] = arm
+        rewards[t] = reward
+        counts[arm] += 1.0
+        estimates[arm] += (reward - estimates[arm]) / counts[arm]
+
+    if warm == horizon:
+        return pulls, rewards
+
+    upper_bounds = np.zeros(num_arms, dtype=float)
+    for arm in range(num_arms):
+        if counts[arm] > 0:
+            upper_bounds[arm] = sup_KL(estimates[arm], exploration_schedule(warm) / counts[arm])
+        else:
+            upper_bounds[arm] = 1.0
+
+    for t in range(warm, horizon):
+        arm = allowed[rand_argmax(upper_bounds[allowed])]
+        reward = float(rng.random() <= mu_true[arm])
+        pulls[t] = arm
+        rewards[t] = reward
+        counts[arm] += 1.0
+        estimates[arm] += (reward - estimates[arm]) / counts[arm]
+        upper_bounds[arm] = sup_KL(estimates[arm], exploration_schedule(t + 1) / counts[arm])
+
+    return pulls, rewards
+
+
+# ---------------------------------------------------------------------------
+# Thompson sampling
+# ---------------------------------------------------------------------------
+
+def Thompson_run(
+    horizon: int,
+    mu_true: Sequence[float],
+    allowed_arms: Sequence[int],
+    prior_succ_fail: Optional[Tuple[Sequence[float], Sequence[float]]] = None,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Bernoulli Thompson sampling restricted to ``allowed_arms``."""
+
+    mu_true = np.asarray(mu_true, dtype=float)
+    num_arms = mu_true.size
+    allowed = tuple(int(a) for a in allowed_arms)
+    if not allowed:
+        raise ValueError("Thompson sampling requires at least one allowed arm.")
+
+    successes = np.zeros(num_arms, dtype=float)
+    failures = np.zeros(num_arms, dtype=float)
+    if prior_succ_fail is not None:
+        s, f = prior_succ_fail
+        successes[: len(s)] = np.asarray(s, dtype=float)
+        failures[: len(f)] = np.asarray(f, dtype=float)
+
+    pulls = np.zeros(horizon, dtype=int)
+    rewards = np.zeros(horizon, dtype=float)
+    rng = np.random.default_rng()
+
+    for t in range(horizon):
+        theta = np.array([rng.beta(successes[i] + 1.0, failures[i] + 1.0) for i in range(num_arms)])
+        arm = allowed[rand_argmax(theta[list(allowed)])]
+        reward = float(rng.random() <= mu_true[arm])
+        pulls[t] = arm
+        rewards[t] = reward
+        if reward > 0.0:
+            successes[arm] += 1.0
+        else:
+            failures[arm] += 1.0
+
+    return pulls, rewards
+
+
+__all__ = [
+    "MISs",
+    "POMISs",
+    "MUCT",
+    "IB",
+    "MUCT_IB",
+    "SCM_to_bandit_machine",
+    "arms_of",
+    "KL",
+    "sup_KL",
+    "KL_UCB_run",
+    "Thompson_run",
+    "rand_argmax",
+]
+
+"""Implementations of causal bandit primitives and the RAPS algorithms.
+
+This module follows the pseudo-code provided in the prompt which mirrors the
+algorithms from *Causal Bandits without Graph Learning*.  It supplies helper
+utilities for working with probabilistic causal models (PCMs) together with
+implementations of the finite-sample RAPS procedure (Algorithm 4), the
+conceptual single-parent variant (Algorithm 1), and a UCB wrapper that uses the
+identified parents for action selection.
+"""
+
+import math
+import random
+from dataclasses import dataclass, field
+from itertools import product
+from typing import Callable, Dict, Iterable, List, MutableMapping, Optional, Protocol, Sequence, Set
+
+
+class PCM(Protocol):
+    """Protocol describing the probabilistic causal model interface.
+
+    A PCM exposes access to the nodes (``V``), the discrete domain size ``K``
+    shared by all nodes, the name of the reward node, and two sampling oracles:
+    ``observe`` for observational data and ``intervene`` for interventional
+    data.  The definitions match the model assumed in the paper.
+    """
+
+    V: Sequence[str]
+    K: int
+    reward_node: str
+
+    def observe(self, B: int) -> List[MutableMapping[str, int]]:
+        """Draw ``B`` observational samples from ``P``."""
+
+    def intervene(self, do: MutableMapping[str, int], B: int) -> List[MutableMapping[str, int]]:
+        """Draw ``B`` samples from ``P(. | do(do))``."""
+
+
+def empirical_mean_R(samples: Sequence[MutableMapping[str, int]], reward_node: str) -> float:
+    """Compute the empirical mean of the reward node from a batch of samples."""
+
+    if not samples:
+        raise ValueError("At least one sample is required to compute the empirical mean.")
+
+    total = 0.0
+    for sample in samples:
+        total += float(sample[reward_node])
+    return total / len(samples)
+
+
+def empirical_marginal(samples: Sequence[MutableMapping[str, int]], node: str, K: int) -> List[float]:
+    """Estimate the marginal distribution Pr(node = v) for v in {0, ..., K-1}."""
+
+    if K <= 0:
+        raise ValueError("Domain size K must be positive.")
+    if not samples:
+        raise ValueError("At least one sample is required to compute marginals.")
+
+    counts = [0.0 for _ in range(K)]
+    for sample in samples:
+        value = sample[node]
+        if not 0 <= value < K:
+            raise ValueError(f"Sampled value {value} for node {node} is outside of the expected domain.")
+        counts[value] += 1.0
+
+    total = float(len(samples))
+    return [count / total for count in counts]
+
+
+def l1_dist(p: Sequence[float], q: Sequence[float]) -> float:
+    """Compute the ℓ₁ distance between two discrete distributions."""
+
+    if len(p) != len(q):
+        raise ValueError("Distributions must have the same support.")
+    return sum(abs(pi - qi) for pi, qi in zip(p, q))
+
+
+def _sorted_nodes(nodes: Iterable[str]) -> List[str]:
+    """Return a deterministic ordering of nodes."""
+
+    return sorted(nodes)
+
+
+def all_assignments(nodes: Iterable[str], K: int) -> Iterable[Dict[str, int]]:
+    """Yield all assignments for ``nodes`` with domain size ``K``.
+
+    Nodes are traversed in sorted order to guarantee determinism.
+    """
+
+    node_list = _sorted_nodes(nodes)
+    if not node_list:
+        yield {}
+        return
+
+    for values in product(range(K), repeat=len(node_list)):
+        assignment = {node: value for node, value in zip(node_list, values)}
+        yield assignment
+
+
+@dataclass
+class RAPSParams:
+    """Finite-sample parameters for the RAPS algorithm."""
+
+    eps: float
+    Delta: float
+    delta: float
+
+    def __post_init__(self) -> None:
+        if self.eps <= 0:
+            raise ValueError("Parameter eps must be strictly positive.")
+        if self.Delta <= 0:
+            raise ValueError("Parameter Delta must be strictly positive.")
+        if not (0 < self.delta < 1):
+            raise ValueError("Parameter delta must lie in (0, 1).")
+
+
+def compute_budget(n: int, K: int, params: RAPSParams) -> int:
+    """Compute the batch size ``B`` required by the finite-sample analysis."""
+
+    if n <= 0:
+        raise ValueError("Number of variables n must be positive.")
+    if K <= 0:
+        raise ValueError("Domain size K must be positive.")
+
+    log = math.log
+    term_reward = 32.0 / (params.Delta ** 2) * log(8 * n * K * ((K + 1) ** n) / params.delta)
+    term_dists = 8.0 / (params.eps ** 2) * log(8 * (n ** 2) * (K ** 2) * ((K + 1) ** n) / params.delta)
+    return math.ceil(max(term_reward, term_dists))
+
+
+def parent_is_in_descendants_of_X(
+    pcm: PCM,
+    X: str,
+    parents_found: Set[str],
+    K: int,
+    B: int,
+    Delta: float,
+) -> bool:
+    """Test if the remaining reward parent lies in ``D(X)``.
+
+    The test compares reward means between the baseline do(\\hat{P}=z) and the
+    intervention do(X=x, \\hat{P}=z) and checks for a difference larger than
+    ``Delta / 2``.
+    """
+
+    R = pcm.reward_node
+    for z in all_assignments(parents_found, K):
+        base_samples = pcm.intervene(do=z, B=B)
+        Rbar_base = empirical_mean_R(base_samples, R)
+        for x in range(K):
+            inter_samples = pcm.intervene(do={**z, X: x}, B=B)
+            Rbar_int = empirical_mean_R(inter_samples, R)
+            if abs(Rbar_base - Rbar_int) > Delta / 2.0:
+                return True
+    return False
+
+
+def descendants_in_C(
+    pcm: PCM,
+    X: str,
+    C: Set[str],
+    parents_found: Set[str],
+    K: int,
+    B: int,
+    eps: float,
+) -> Set[str]:
+    """Estimate the descendants of ``X`` within the candidate set ``C``."""
+
+    descendants: Set[str] = set()
+    for z in all_assignments(parents_found, K):
+        base_samples = pcm.intervene(do=z, B=B)
+        base_marg = {Y: empirical_marginal(base_samples, Y, K) for Y in C}
+        for x in range(K):
+            inter_samples = pcm.intervene(do={**z, X: x}, B=B)
+            inter_marg = {Y: empirical_marginal(inter_samples, Y, K) for Y in C}
+            for Y in C:
+                if l1_dist(base_marg[Y], inter_marg[Y]) > eps / 2.0:
+                    descendants.add(Y)
+    return descendants
+
+
+def RAPS_single_parent_conceptual(
+    pcm: PCM,
+    V: Iterable[str],
+    params: RAPSParams,
+    parents_found: Optional[Set[str]] = None,
+) -> Optional[str]:
+    """Conceptual single-parent RAPS (Algorithm 1).
+
+    This version uses the finite-sample tests for determining descendants and
+    reward ancestry.  It is included primarily for completeness and mirrors the
+    recursive routine described in the pseudo-code.  Because it relies on
+    repeated sampling, it should not be used in performance-critical settings.
+    """
+
+    candidate_set: Set[str] = set(V)
+    fixed_parents: Set[str] = set() if parents_found is None else set(parents_found)
+    if not candidate_set:
+        return None
+
+    B = compute_budget(len(pcm.V), pcm.K, params)
+
+    def rec(candidates: Set[str]) -> Optional[str]:
+        if not candidates:
+            return None
+        X = random.choice(list(candidates))
+        if parent_is_in_descendants_of_X(pcm, X, fixed_parents, pcm.K, B, params.Delta):
+            descendants = descendants_in_C(pcm, X, candidates, fixed_parents, pcm.K, B, params.eps)
+            P_hat = rec(descendants - {X})
+            return X if P_hat is None else P_hat
+        descendants = descendants_in_C(pcm, X, candidates, fixed_parents, pcm.K, B, params.eps)
+        return rec(candidates - descendants)
+
+    return rec(candidate_set)
+
+
+@dataclass
+class RAPSState:
+    """Internal state tracked by the finite-sample RAPS algorithm."""
+
+    parents_found: Set[str] = field(default_factory=set)
+    candidates: Set[str] = field(default_factory=set)
+    banned: Set[str] = field(default_factory=set)
+    last_candidate_parent: Optional[str] = None
+    last_descendants: Set[str] = field(default_factory=set)
+
+
+def raps_full(pcm: PCM, params: RAPSParams) -> Set[str]:
+    """Finite-sample RAPS implementation (Algorithm 4)."""
+
+    n = len(pcm.V)
+    K = pcm.K
+    R = pcm.reward_node
+
+    state = RAPSState(candidates=set(pcm.V))
+
+    B = compute_budget(n, K, params)
+    obs_samples = pcm.observe(B)
+    Rbar_obs = empirical_mean_R(obs_samples, R)
+    _ = {X: empirical_marginal(obs_samples, X, K) for X in pcm.V}
+    _ = Rbar_obs  # silence unused variable warning
+
+    while state.candidates:
+        X = random.choice(list(state.candidates))
+
+        D_union: Set[str] = set()
+        reward_is_desc = False
+
+        scope = set(state.candidates)
+        scope.add(X)
+
+        for z in all_assignments(state.parents_found, K):
+            base_samples = pcm.intervene(do=z, B=B)
+            Rbar_base = empirical_mean_R(base_samples, R)
+            marg_base = {Y: empirical_marginal(base_samples, Y, K) for Y in scope}
+
+            for x in range(K):
+                inter_samples = pcm.intervene(do={**z, X: x}, B=B)
+                Rbar_int = empirical_mean_R(inter_samples, R)
+                marg_int = {Y: empirical_marginal(inter_samples, Y, K) for Y in scope}
+
+                for Y in scope:
+                    if l1_dist(marg_base[Y], marg_int[Y]) > params.eps / 2.0:
+                        D_union.add(Y)
+
+                if abs(Rbar_base - Rbar_int) > params.Delta / 2.0:
+                    reward_is_desc = True
+
+        if reward_is_desc:
+            state.candidates = D_union - {X}
+            state.last_candidate_parent = X
+            state.last_descendants = set(D_union)
+        else:
+            state.candidates -= D_union
+            state.banned |= D_union
+
+        if not state.candidates and state.last_candidate_parent is not None:
+            state.parents_found.add(state.last_candidate_parent)
+            state.banned |= state.last_descendants
+            state.candidates = set(pcm.V) - state.banned
+            state.last_candidate_parent = None
+            state.last_descendants = set()
+
+    return state.parents_found
+
+
+def RAPS_multi_parent(pcm: PCM, params: RAPSParams) -> Set[str]:
+    """Convenience wrapper that repeatedly applies the conceptual RAPS routine."""
+
+    parents: Set[str] = set()
+    banned: Set[str] = set()
+
+    while True:
+        remaining = [node for node in pcm.V if node not in banned]
+        parent = RAPS_single_parent_conceptual(pcm, remaining, params, parents)
+        if parent is None:
+            break
+        parents.add(parent)
+
+        descendants = descendants_in_C(pcm, parent, set(remaining), parents, pcm.K, compute_budget(len(pcm.V), pcm.K, params), params.eps)
+        banned |= descendants
+
+    return parents
+
+
+class UCBProtocol(Protocol):
+    """Protocol describing the interface expected from a UCB implementation."""
+
+    def select(self) -> int:
+        ...
+
+    def update(self, reward: float) -> None:
+        ...
+
+
+class RAPSPlusUCB:
+    """Bandit wrapper that combines RAPS parent discovery with a UCB policy."""
+
+    def __init__(self, pcm: PCM, params: RAPSParams, ucb_factory: Callable[[int], UCBProtocol]):
+        self.pcm = pcm
+        self.params = params
+        self.ucb_factory = ucb_factory
+        self.parents: Optional[Set[str]] = None
+        self.ucb: Optional[UCBProtocol] = None
+        self._arms: List[Dict[str, int]] = []
+
+    def initialize(self) -> None:
+        if self.parents is None:
+            self.parents = raps_full(self.pcm, self.params)
+            self._arms = list(all_assignments(self.parents, self.pcm.K))
+            self.ucb = self.ucb_factory(len(self._arms))
+
+    def select_arm(self) -> Dict[str, int]:
+        if self.ucb is None:
+            self.initialize()
+        assert self.ucb is not None
+        index = self.ucb.select()
+        return self._arms[index]
+
+    def step(self) -> float:
+        arm = self.select_arm()
+        samples = self.pcm.intervene(do=arm, B=1)
+        reward = float(samples[0][self.pcm.reward_node])
+        assert self.ucb is not None
+        self.ucb.update(reward)
+        return reward
