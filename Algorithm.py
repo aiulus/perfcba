@@ -26,8 +26,30 @@ class BasePolicy(ABC):
         ...
 
     @abstractmethod
-    def update(self, t: int, a: int, x: float) -> None:
-        """Process the observed reward from round t."""
+    def update(
+        self,
+        t: int,
+        a: int,
+        x: float,
+        *,
+        info: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Process the observed reward from round ``t``.
+
+        Parameters
+        ----------
+        t:
+            Current round (1-indexed).
+        a:
+            Arm pulled at round ``t``.
+        x:
+            Observed reward.
+        info:
+            Optional side-information emitted by the environment together with
+            the reward (e.g., observed covariates for structured/causal
+            policies).  Policies that do not make use of side-information can
+            safely ignore this argument.
+        """
         ...
 
     def get_params(self) -> Dict[str, Any]:

@@ -2,7 +2,7 @@
 from __future__ import annotations
 import math
 import random
-from typing import Callable, Iterable, List, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 import numpy as np
 
 from Algorithm import BasePolicy, History
@@ -30,8 +30,8 @@ class RandomPolicy(BasePolicy):
         del t, history
         return self._rng.randrange(self.n_arms)
 
-    def update(self, t: int, a: int, x: float) -> None:
-        del t, a, x  # Random policy is memoryless.
+    def update(self, t: int, a: int, x: float, *, info: Optional[Dict[str, Any]] = None) -> None:
+        del t, a, x, info  # Random policy is memoryless.
 
     def get_params(self) -> dict:
         return {"seed": self._seed}
@@ -78,12 +78,100 @@ class ExploreThenCommit(BasePolicy):
             self._committed_arm = int(np.argmax(means))
         return self._committed_arm
 
-    def update(self, t: int, a: int, x: float) -> None:
+    def update(self, t: int, a: int, x: float, *, info: Optional[Dict[str, Any]] = None) -> None:
         self.counts[a] += 1
         self.sums[a] += x
 
+        if info is not None:
+            del info
+
     def get_params(self):
         return {"tau": self.tau}
+
+class EpsilonGreedy(BasePolicy):
+    """Classical :math:`\varepsilon`-greedy exploration strategy."""
+
+    name = "epsilon-greedy"
+
+    def __init__(
+        self,
+        epsilon: Union[float, Callable[[int], float]] = 0.1,
+        *,
+        tie_break: str = "random",
+    ) -> None:
+        if isinstance(epsilon, (int, float)):
+            if not (0.0 <= float(epsilon) <= 1.0):
+                raise ValueError("epsilon must lie in [0, 1]")
+        elif not callable(epsilon):
+            raise TypeError("epsilon must be a float or a callable schedule")
+
+        if tie_break not in {"first", "random"}:
+            raise ValueError("tie_break must be 'first' or 'random'")
+
+        self._epsilon = epsilon
+        self.tie_break = tie_break
+
+        self.n_arms: int = 0
+        self.counts: np.ndarray
+        self.sums: np.ndarray
+        self._warmup: List[int] = []
+        self._rng = random.Random()
+
+    def reset(self, n_arms: int, horizon: Optional[int] = None, **_: object) -> None:
+        del horizon
+        self.n_arms = int(n_arms)
+        if self.n_arms <= 0:
+            raise ValueError("Number of arms must be positive")
+        self.counts = np.zeros(self.n_arms, dtype=int)
+        self.sums = np.zeros(self.n_arms, dtype=float)
+        self._warmup = list(range(self.n_arms))
+        self._rng = random.Random()
+
+    def _epsilon_value(self, t: int) -> float:
+        if callable(self._epsilon):
+            value = float(self._epsilon(t))
+        else:
+            value = float(self._epsilon)
+        return float(min(1.0, max(0.0, value)))
+
+    def _resolve_ties(self, candidates: Sequence[int]) -> int:
+        if self.tie_break == "first":
+            return candidates[0]
+        return self._rng.choice(list(candidates))
+
+    def choose(self, t: int, history: History) -> int:
+        del history
+        if self._warmup:
+            return self._warmup.pop(0)
+
+        eps = self._epsilon_value(t)
+        if self._rng.random() < eps:
+            return self._rng.randrange(self.n_arms)
+
+        means = np.divide(
+            self.sums,
+            np.maximum(1, self.counts),
+            out=np.zeros_like(self.sums),
+        )
+        best_value = float(np.max(means))
+        candidates = np.flatnonzero(np.isclose(means, best_value)).tolist()
+        return self._resolve_ties(candidates)
+
+    def update(
+        self,
+        t: int,
+        a: int,
+        x: float,
+        *,
+        info: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        del t, info
+        self.counts[a] += 1
+        self.sums[a] += float(x)
+
+    def get_params(self) -> dict:
+        return {"epsilon": self._epsilon, "tie_break": self.tie_break}
+
 
 
 class UCB(BasePolicy):
@@ -192,8 +280,15 @@ class UCB(BasePolicy):
         best = np.flatnonzero(np.isclose(indices, max_index)).tolist()
         return self._resolve_ties(best)
 
-    def update(self, t: int, a: int, x: float) -> None:
-        del t
+    def update(
+        self,
+        t: int,
+        a: int,
+        x: float,
+        *,
+        info: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        del t, info
         self.total_pulls += 1
         self.counts[a] += 1
         self.sums[a] += float(x)
@@ -311,8 +406,15 @@ class KLUCB(BasePolicy):
         best = np.flatnonzero(np.isclose(indices, max_index)).tolist()
         return self._resolve_ties(best)
 
-    def update(self, t: int, a: int, x: float) -> None:
-        del t
+    def update(
+        self,
+        t: int,
+        a: int,
+        x: float,
+        *,
+        info: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        del t, info
         if x < 0.0 or x > 1.0:
             raise ValueError("KL-UCB expects Bernoulli rewards in [0, 1]")
         self.total_pulls += 1
@@ -393,8 +495,15 @@ class ThompsonSamplingPolicy(BasePolicy):
         self._last_actions = tuple(actions)
         return int(index)
 
-    def update(self, t: int, a: int, x: float) -> None:
-        del t
+    def update(
+        self,
+        t: int,
+        a: int,
+        x: float,
+        *,
+        info: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        del t, info
         self.prior.update(a, x)
 
 
@@ -655,8 +764,15 @@ class LinearThompsonPolicy(ThompsonSamplingPolicy):
         self._last_context = contexts[index]
         return int(index)
 
-    def update(self, t: int, a: int, x: float) -> None:
-        del a
+    def update(
+        self,
+        t: int,
+        a: int,
+        x: float,
+        *,
+        info: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        del a, info
         if self._last_context is None:
             raise RuntimeError("Context must be available before updating the linear prior")
         self.prior.update(self._last_context, x)
@@ -804,7 +920,7 @@ def run_bandit(env, policy: BasePolicy, horizon: int) -> Tuple[List[int], List[f
             reward = env.pull(arm)
         else:
             reward = env(arm)  # type: ignore[call-arg]
-        policy.update(t, arm, reward)
+        policy.update(t, arm, reward, info=None)
         actions.append(arm)
         rewards.append(reward)
 
