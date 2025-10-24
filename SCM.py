@@ -195,27 +195,26 @@ class LinearGaussianSCM(SCM):
         # Partition indices into S (intervened) and R (rest).
         name_to_idx = {v: i for i, v in enumerate(self.nodes)}
         S_idx = np.array(sorted(name_to_idx[v] for v in intervention.hard.keys()), dtype=int)
+        if S_idx.size == 0:
+            # Degenerate case where intervention has no hard assignments.
+            return self._A_inv @ (self.c + self.mu_u)
         R_idx = np.array(sorted(set(range(n)) - set(S_idx)), dtype=int)
-        z = np.zeros(len(S_idx))
-        for k, v in enumerate(intervention.hard.keys()):
-            z[k] = float(intervention.hard[v])
+        z = np.array([float(intervention.hard[self.nodes[i]]) for i in S_idx], dtype=float)
 
-        # Blocks of W (note: model is A X = c + U with A = I - W^T)
-        # For R block under do, equations: A_RR X_R = c_R + mu_U_R + (I - W^T)_{RS} X_S - I_RS X_S
-        # Simpler route: write structural equations explicitly:
-        #   X = W^T X + c + U  with X_S = z  => X_R = W_RR^T X_R + W_SR^T X_S + c_R + mu_U_R
-        W_T = self.W.T
-        W_RR_T = W_T[np.ix_(R_idx, R_idx)]
-        W_SR_T = W_T[np.ix_(S_idx, R_idx)]
+        # Structural form: X = W X + c + U (rows index children, columns parents).
+        # For nodes in R (unintervened):
+        #   (I - W_RR) X_R = W_RS z + c_R + mu_R.
+        W_RR = self.W[np.ix_(R_idx, R_idx)]
+        W_RS = self.W[np.ix_(R_idx, S_idx)]
         c_R = self.c[R_idx]
         mu_R = self.mu_u[R_idx]
 
-        A_R = np.eye(len(R_idx)) - W_RR_T
-        b_R = c_R + mu_R + W_SR_T.T @ z  # careful: W_SR_T is |S| x |R|, so its transpose is |R| x |S|
+        A_R = np.eye(len(R_idx)) - W_RR
+        b_R = c_R + mu_R + W_RS @ z
 
-        X_R_mean = np.linalg.solve(A_R, b_R) if R_idx.size else np.array([], dtype=float)
         X_mean = np.zeros(n, dtype=float)
-        X_mean[R_idx] = X_R_mean
+        if R_idx.size:
+            X_mean[R_idx] = np.linalg.solve(A_R, b_R)
         X_mean[S_idx] = z
         return X_mean
 

@@ -4,8 +4,8 @@ from typing import Optional, Dict, Any, Tuple
 
 import numpy as np
 
-from Algorithm import History, BasePolicy
-from Bandit import AbstractBandit
+from .Algorithm import History, BasePolicy
+from .Bandit import AbstractBandit
 
 
 @dataclass
@@ -57,7 +57,7 @@ class Experiment:
                 x = out
                 obs_log.append({})
 
-            self.policy.update(t, a, float(x))
+            self.policy.update(t, a, float(x), info=obs_log[-1])
             actions[t - 1] = a
             rewards[t - 1] = float(x)
 

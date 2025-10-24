@@ -1,7 +1,7 @@
-from SCM import LinearGaussianSCM, Intervention
-from Bandit import SCMBandit
-from Experiment import Experiment, RunConfig
-from classical_bandits import ExploreThenCommit
+from ..SCM import LinearGaussianSCM, Intervention
+from ..Bandit import SCMBandit
+from ..Experiment import Experiment, RunConfig
+from ..classical_bandits import ExploreThenCommit
 import numpy as np
 
 nodes = ["X", "Y"]

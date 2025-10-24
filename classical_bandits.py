@@ -5,7 +5,7 @@ import random
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 import numpy as np
 
-from Algorithm import BasePolicy, History
+from .Algorithm import BasePolicy, History
 
 
 class RandomPolicy(BasePolicy):
@@ -331,15 +331,16 @@ def kl_ucb_solve_upper(
         return 1.0
 
     target = log_ft / max(1, pulls)
-    lo = float(mu_hat)
+    mu_hat = float(min(max(mu_hat, 0.0), 1.0))
+    lo = mu_hat
     hi = 1.0
 
-    if kl_bernoulli(lo, hi) <= target:
+    if kl_bernoulli(mu_hat, hi) <= target:
         return hi
 
     for _ in range(max_iter):
         mid = 0.5 * (lo + hi)
-        if kl_bernoulli(lo, mid) <= target:
+        if kl_bernoulli(mu_hat, mid) <= target:
             lo = mid
         else:
             hi = mid
@@ -490,10 +491,16 @@ class ThompsonSamplingPolicy(BasePolicy):
         if len(actions) == 0:
             raise ValueError("Action space must contain at least one action")
         index = self.planner(theta_hat, actions, self.reward_function, self.likelihood)
-        if not (0 <= index < len(actions)):
+        chosen_idx = int(index)
+        if not (0 <= chosen_idx < len(actions)):
             raise IndexError("Planner returned an invalid action index")
         self._last_actions = tuple(actions)
-        return int(index)
+        chosen = actions[chosen_idx]
+        if isinstance(chosen, (np.integer, int)):
+            return int(chosen)
+        if isinstance(chosen, np.ndarray) and chosen.shape == ():
+            return int(chosen.item())
+        raise TypeError("Action provider must yield integer-typed arm identifiers")
 
     def update(
         self,

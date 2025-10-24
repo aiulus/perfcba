@@ -1,72 +1,54 @@
-metrics.py
-+68
--0
-
 from __future__ import annotations
-
-"""Evaluation metrics for bandit experiments."""
-
-from typing import Iterable, Optional
-
+from typing import Optional
 import numpy as np
-
 from Algorithm import History
 from Bandit import AbstractBandit
 
-
 def cumulative_pseudo_regret(history: History, bandit: AbstractBandit) -> np.ndarray:
-    """Return the cumulative pseudo-regret curve for ``history``."""
-
-    means = np.array([bandit.mean(a) for a in range(bandit.n_arms)], dtype=float)
-    optimal = float(np.max(means))
-    played_means = means[history.actions]
-    gaps = optimal - played_means
-    return np.cumsum(gaps)
-
+    """R_t = sum_{s<=t} (mu* - mu_{a_s})."""
+    if history.actions.size == 0:
+        return np.zeros(0, dtype=float)
+    mu_star = bandit.best_mean()
+    means = np.array([bandit.mean(a) for a in history.actions], dtype=float)
+    inst = mu_star - means
+    return np.cumsum(inst)
 
 def simple_regret(history: History, bandit: AbstractBandit) -> float:
-    means = np.array([bandit.mean(a) for a in range(bandit.n_arms)], dtype=float)
-    best = float(np.max(means))
-    most_played = int(np.argmax(history.pulls))
-    return float(best - means[most_played])
-
-
-def area_under_regret_curve(regret: np.ndarray) -> float:
-    if regret.size == 0:
+    """mu* - mu_{hat a}, hat a = most played arm (ties -> smallest index)."""
+    if history.actions.size == 0:
         return 0.0
-    return float(np.trapz(regret, dx=1.0))
+    pulls = np.bincount(history.actions, minlength=bandit.n_arms)
+    hat_a = int(np.argmax(pulls))
+    return float(bandit.best_mean() - bandit.mean(hat_a))
 
+def area_under_regret_curve(regret_curve: np.ndarray) -> float:
+    """Discrete AUC of the cumulative regret curve (lower = better)."""
+    if regret_curve.size == 0:
+        return 0.0
+    # Equivalent to trapezoid with unit spacing
+    return float(np.trapz(regret_curve, dx=1.0))
 
-def time_to_epsilon_optimal(regret: np.ndarray, epsilon: float) -> Optional[int]:
-    if epsilon < 0:
-        raise ValueError("epsilon must be non-negative")
-    indices = np.flatnonzero(regret <= epsilon)
-    if indices.size == 0:
+def time_to_epsilon_optimal(regret_curve: np.ndarray, epsilon: float = 1.0) -> Optional[int]:
+    """
+    First t such that average regret <= epsilon, i.e., R_t / t <= epsilon.
+    Returns None if never achieved.
+    """
+    if regret_curve.size == 0:
         return None
-    return int(indices[0] + 1)  # convert to 1-indexed horizon
-
-
-def mean_squared_error(estimates: Iterable[float], truth: Iterable[float]) -> float:
-    est = np.asarray(list(estimates), dtype=float)
-    tru = np.asarray(list(truth), dtype=float)
-    if est.shape != tru.shape:
-        raise ValueError("estimates and truth must have matching shapes")
-    if est.size == 0:
-        return 0.0
-    diff = est - tru
-    return float(np.mean(diff ** 2))
-
+    t = np.arange(1, regret_curve.size + 1)
+    avg = regret_curve / t
+    idx = np.nonzero(avg <= epsilon)[0]
+    return int(idx[0] + 1) if idx.size else None
 
 def pulls_per_arm(history: History) -> np.ndarray:
     return history.pulls.copy()
 
-
 def summary(history: History, bandit: AbstractBandit, *, epsilon: float = 1.0) -> dict:
-    regret_curve = cumulative_pseudo_regret(history, bandit)
+    rc = cumulative_pseudo_regret(history, bandit)
     return {
-        "total_regret": float(regret_curve[-1]) if regret_curve.size else 0.0,
+        "total_regret": float(rc[-1]) if rc.size else 0.0,
         "simple_regret": simple_regret(history, bandit),
-        "aurc": area_under_regret_curve(regret_curve),
-        "time_to_epsilon": time_to_epsilon_optimal(regret_curve, epsilon),
+        "aurc": area_under_regret_curve(rc),
+        "time_to_epsilon": time_to_epsilon_optimal(rc, epsilon),
         "pulls": history.pulls.tolist(),
     }

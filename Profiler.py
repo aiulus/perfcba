@@ -3,8 +3,8 @@ from __future__ import annotations
 import numpy as np
 from typing import Dict, Any
 
-from Algorithm import History
-from Bandit import AbstractBandit
+from .Algorithm import History
+from .Bandit import AbstractBandit
 
 
 class Profiler:

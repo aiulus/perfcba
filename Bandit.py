@@ -1,8 +1,8 @@
 # Bandit.py
 from __future__ import annotations
 from abc import ABC, abstractmethod
-from typing import Sequence, Callable, Optional, Dict, Any
-from SCM import SCM, LinearGaussianSCM, Intervention
+from typing import Sequence, Callable, Optional, Dict, Any,  Iterable, List, Tuple
+from .SCM import SCM, LinearGaussianSCM, Intervention
 
 import numpy as np
 
@@ -31,6 +31,86 @@ class AbstractBandit(ABC):
 
     def info(self) -> Dict[str, Any]:
         return {}
+
+class AntiCorrelatedGaussianBandit(AbstractBandit):
+    """Two-arm Gaussian bandit with perfectly anti-correlated means."""
+
+    def __init__(self, mean_arm0: float, sigma: float = 1.0) -> None:
+        if sigma <= 0:
+            raise ValueError("sigma must be positive")
+        self.mu0 = float(mean_arm0)
+        self.mu1 = float(1.0 - mean_arm0)
+        self.sigma = float(sigma)
+        self.n_arms = 2
+
+    def reset(self, rng: np.random.Generator) -> None:
+        del rng
+
+    def sample(self, a: int, rng: np.random.Generator) -> float:
+        if a not in (0, 1):
+            raise IndexError("arm must be 0 or 1")
+        mean = self.mu0 if a == 0 else self.mu1
+        return float(rng.normal(loc=mean, scale=self.sigma))
+
+    def mean(self, a: int) -> float:
+        if a not in (0, 1):
+            raise IndexError("arm must be 0 or 1")
+        return float(self.mu0 if a == 0 else self.mu1)
+
+    def info(self) -> Dict[str, Any]:
+        return {"type": "AntiCorrelatedGaussian", "mu0": self.mu0, "mu1": self.mu1, "sigma": self.sigma}
+
+
+class LinearBandit(AbstractBandit):
+    """Structured bandit with known arm features and linear rewards."""
+
+    def __init__(
+        self,
+        features: np.ndarray,
+        theta: np.ndarray,
+        *,
+        sigma: float = 1.0,
+        provide_features: bool = True,
+    ) -> None:
+        X = np.asarray(features, dtype=float)
+        if X.ndim != 2:
+            raise ValueError("features must be a 2-D array")
+        theta = np.asarray(theta, dtype=float).reshape(-1)
+        if theta.shape[0] != X.shape[1]:
+            raise ValueError("theta dimension must match feature dimension")
+        if sigma <= 0:
+            raise ValueError("sigma must be positive")
+        self.X = X
+        self.theta = theta
+        self.sigma = float(sigma)
+        self.n_arms = int(X.shape[0])
+        self._means = X @ theta
+        self.provide_features = bool(provide_features)
+
+    def reset(self, rng: np.random.Generator) -> None:
+        del rng
+
+    def sample(self, a: int, rng: np.random.Generator) -> float | tuple[float, Dict[str, Any]]:
+        if not (0 <= a < self.n_arms):
+            raise IndexError("arm out of range")
+        mean = float(self._means[a])
+        reward = float(rng.normal(loc=mean, scale=self.sigma))
+        if self.provide_features:
+            return reward, {"x": self.X[a].copy()}
+        return reward
+
+    def mean(self, a: int) -> float:
+        if not (0 <= a < self.n_arms):
+            raise IndexError("arm out of range")
+        return float(self._means[a])
+
+    def info(self) -> Dict[str, Any]:
+        return {
+            "type": "LinearBandit",
+            "n_arms": self.n_arms,
+            "dimension": int(self.X.shape[1]),
+            "sigma": self.sigma,
+        }
 
 
 # -------- Unstructured examples --------
@@ -101,38 +181,6 @@ class TwoArmComplementBernoulli(AbstractBandit):
 
     def info(self):
         return {"type": "TwoArmComplementBernoulli", "theta": self.theta}
-
-
-class SCMBandit(AbstractBandit):
-    """
-    Generic SCM-backed bandit via user-supplied mean/sample callables.
-    - action_space: number of interventions/arms (0..n_arms-1)
-    - mean_fn(a) -> E[Y | do(a)]
-    - sample_fn(a, rng) -> reward sample from P(Y | do(a))
-    """
-    def __init__(
-        self,
-        n_arms: int,
-        mean_fn: Callable[[int], float],
-        sample_fn: Callable[[int, np.random.Generator], float],
-        meta: Optional[Dict[str, Any]] = None,
-    ) -> None:
-        self.n_arms = int(n_arms)
-        self._mean_fn = mean_fn
-        self._sample_fn = sample_fn
-        self._meta = meta or {}
-
-    def reset(self, rng: np.random.Generator) -> None:
-        pass
-
-    def sample(self, a: int, rng: np.random.Generator) -> float:
-        return float(self._sample_fn(a, rng))
-
-    def mean(self, a: int) -> float:
-        return float(self._mean_fn(a))
-
-    def info(self):
-        return {"type": "SCMBandit", **self._meta}
 
 
 class SCMBandit(AbstractBandit):

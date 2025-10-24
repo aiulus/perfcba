@@ -1,102 +1,135 @@
 from __future__ import annotations
-
-"""Causal bandit policies using back-door adjustment."""
-
 from typing import Dict, List, Optional, Any
-
 import numpy as np
-
 from Algorithm import BasePolicy, History
-from estimators import (
-    MultinomialLogisticRegression,
-    RidgeOutcomeRegressor,
-    dr_crossfit,
-    ess,
-)
-
+from estimators.models import MultinomialLogisticRegression, RidgeOutcomeRegressor
+from estimators.robust import dr_crossfit, ess
 
 def _info_to_array(info: Optional[Dict[str, Any]]) -> np.ndarray:
-    if info is None:
-        raise ValueError("Causal policies require observed covariates in info")
-    if "x" in info:
-        arr = np.asarray(info["x"], dtype=float)
-    elif "covariates" in info:
-        arr = np.asarray(info["covariates"], dtype=float)
-    else:
-        keys = sorted(info.keys())
-        values = [info[k] for k in keys]
-        arr = np.asarray(values, dtype=float)
-    if arr.ndim == 0:
-        arr = arr.reshape(1)
-    return arr.astype(float)
+    """Flatten info dict (e.g., {'Z': zvec, 'X': x}) into 1D covariate vector."""
+    if not info:
+        return np.zeros(0, dtype=float)
+    parts: List[np.ndarray] = []
+    for k in sorted(info.keys()):
+        v = info[k]
+        arr = np.atleast_1d(np.asarray(v, dtype=float))
+        parts.append(arr.ravel())
+    return np.concatenate(parts) if parts else np.zeros(0, dtype=float)
 
+class BackdoorUCB(BasePolicy):
+    """
+    UCB-style policy using back-door adjustment via DR estimates per arm.
+    Re-fits propensity (multinomial logistic) and outcome (ridge) models on a schedule.
+    """
+    name = "backdoor-ucb"
 
-class CausalUCBBackdoor(BasePolicy):
-    """UCB-style policy using doubly-robust estimates under back-door adjustment."""
-
-    name = "causal-ucb-dr"
-
-    def __init__(
-        self,
-        n_arms: int,
-        *,
-        outcome_model: RidgeOutcomeRegressor,
-        propensity_model: MultinomialLogisticRegression,
-        refit_every: int = 50,
-        min_samples: int = 20,
-        clip: float = 10.0,
-        alpha: float = 1.0,
-    ) -> None:
-        if n_arms <= 1:
-            raise ValueError("n_arms must be at least 2")
+    def __init__(self, n_arms: int, refit_every: int = 25, clip: Optional[float] = 20.0,
+                 alpha: float = 1.0) -> None:
         self.n_arms = int(n_arms)
-        self._outcome_proto = outcome_model
-        self._propensity_proto = propensity_model
         self.refit_every = int(refit_every)
-        self.min_samples = int(min_samples)
-        self.clip = float(clip)
+        self.clip = clip
         self.alpha = float(alpha)
 
-        self._reset_buffers()
-
-    def _reset_buffers(self) -> None:
+    def reset(self, n_arms: int, horizon: int) -> None:
+        del horizon
+        if n_arms != self.n_arms:
+            self.n_arms = int(n_arms)
         self.X: List[np.ndarray] = []
         self.a: List[int] = []
         self.y: List[float] = []
+        self._last_refit = 0
         self.mu_hat = np.zeros(self.n_arms, dtype=float)
         self.var_hat = np.ones(self.n_arms, dtype=float)
-        self.ess = np.zeros(self.n_arms, dtype=float)
-        self._last_refit = 0
-        self._t = 0
-
-    def reset(self, n_arms: int, horizon: Optional[int] = None, **_: Any) -> None:
-        del horizon
-        if int(n_arms) != self.n_arms:
-            raise ValueError("n_arms mismatch for causal policy")
-        self._reset_buffers()
 
     def _refit(self) -> None:
-        if len(self.y) < self.min_samples:
+        if len(self.y) < self.n_arms:
             return
-        X = np.vstack(self.X)
+        X = np.vstack(self.X) if self.X else np.zeros((0, 0), dtype=float)
         a = np.asarray(self.a, dtype=int)
         y = np.asarray(self.y, dtype=float)
+        prop = MultinomialLogisticRegression(n_classes=self.n_arms)
+        out = RidgeOutcomeRegressor(l2=1e-2)
         for arm in range(self.n_arms):
-            mu, weights, dr_vals = dr_crossfit(
+            mean_arm, _, dr_vals = dr_crossfit(
                 y,
                 a,
                 X,
                 arm,
-                self._outcome_proto.clone(),
-                self._propensity_proto.clone(),
+                out,
+                prop,
+                K=2,
                 clip=self.clip,
             )
-            self.mu_hat[arm] = mu
-            if dr_vals.size > 1:
-                self.var_hat[arm] = float(np.var(dr_vals, ddof=1))
-            else:
-                self.var_hat[arm] = 1.0
-            self.ess[arm] = ess(weights)
+            self.mu_hat[arm] = mean_arm
+            # conservative variance proxy
+            self.var_hat[arm] = float(np.var(np.asarray(dr_vals), ddof=1)) if len(dr_vals) > 1 else 1.0
+        self._last_refit = self._t
+
+    def choose(self, t: int, history: History) -> int:
+        del history
+        self._t = t
+        if t <= self.n_arms:
+            return t - 1
+        if (t - self._last_refit) >= self.refit_every:
+            self._refit()
+        n = max(1, len(self.y))
+        ucb = self.mu_hat + self.alpha * np.sqrt(self.var_hat / n)
+        return int(np.argmax(ucb))
+
+    def update(self, t: int, a: int, x: float, *, info: Optional[Dict[str, Any]] = None) -> None:
+        del t
+        self.X.append(_info_to_array(info))
+        self.a.append(int(a))
+        self.y.append(float(x))
+
+    def diagnostics(self) -> Dict[str, Any]:
+        return {"mu_hat": self.mu_hat.tolist(), "var_hat": self.var_hat.tolist(),
+                "n": len(self.y), "ess": None}
+
+class BackdoorTS(BasePolicy):
+    """Thompson sampling over DR means with variance scaling."""
+    name = "backdoor-ts"
+
+    def __init__(self, n_arms: int, refit_every: int = 25, clip: Optional[float] = 20.0,
+                 variance_scale: float = 1.0, min_samples: int = 10) -> None:
+        self.n_arms = int(n_arms)
+        self.refit_every = int(refit_every)
+        self.clip = clip
+        self.variance_scale = float(variance_scale)
+        self.min_samples = int(min_samples)
+
+    def reset(self, n_arms: int, horizon: int) -> None:
+        del horizon
+        if n_arms != self.n_arms:
+            self.n_arms = int(n_arms)
+        self.X: List[np.ndarray] = []
+        self.a: List[int] = []
+        self.y: List[float] = []
+        self._last_refit = 0
+        self.mu_hat = np.zeros(self.n_arms, dtype=float)
+        self.var_hat = np.ones(self.n_arms, dtype=float)
+
+    def _refit(self) -> None:
+        if len(self.y) < self.n_arms:
+            return
+        X = np.vstack(self.X) if self.X else np.zeros((0, 0), dtype=float)
+        a = np.asarray(self.a, dtype=int)
+        y = np.asarray(self.y, dtype=float)
+        prop = MultinomialLogisticRegression(n_classes=self.n_arms)
+        out = RidgeOutcomeRegressor(l2=1e-2)
+        for arm in range(self.n_arms):
+            mean_arm, _, dr_vals = dr_crossfit(
+                y,
+                a,
+                X,
+                arm,
+                out,
+                prop,
+                K=2,
+                clip=self.clip,
+            )
+            self.mu_hat[arm] = mean_arm
+            self.var_hat[arm] = float(np.var(np.asarray(dr_vals), ddof=1)) if len(dr_vals) > 1 else 1.0
         self._last_refit = self._t
 
     def choose(self, t: int, history: History) -> int:
@@ -108,65 +141,17 @@ class CausalUCBBackdoor(BasePolicy):
             self._refit()
         if len(self.y) < self.min_samples:
             return np.random.randint(self.n_arms)
-        scale = np.sqrt(np.log(max(3, t))) / max(1, len(self.y))
-        bonuses = self.alpha * np.sqrt(np.maximum(self.var_hat, 1e-9)) * scale
-        indices = self.mu_hat + bonuses
-        return int(np.argmax(indices))
+        n = max(1, len(self.y))
+        scale = self.variance_scale * np.sqrt(np.maximum(self.var_hat, 1e-9)) / n
+        samples = np.random.normal(self.mu_hat, scale)
+        return int(np.argmax(samples))
 
-    def update(
-        self,
-        t: int,
-        a: int,
-        x: float,
-        *,
-        info: Optional[Dict[str, Any]] = None,
-    ) -> None:
+    def update(self, t: int, a: int, x: float, *, info: Optional[Dict[str, Any]] = None) -> None:
         del t
-        covariates = _info_to_array(info)
-        self.X.append(covariates)
+        self.X.append(_info_to_array(info))
         self.a.append(int(a))
         self.y.append(float(x))
 
     def diagnostics(self) -> Dict[str, Any]:
-        return {"mu_hat": self.mu_hat.copy(), "var_hat": self.var_hat.copy(), "ess": self.ess.copy()}
-
-
-class CausalThompsonBackdoor(CausalUCBBackdoor):
-    """Thompson sampling variant using doubly-robust mean estimates."""
-
-    name = "causal-ts-dr"
-
-    def __init__(
-        self,
-        n_arms: int,
-        *,
-        outcome_model: RidgeOutcomeRegressor,
-        propensity_model: MultinomialLogisticRegression,
-        refit_every: int = 50,
-        min_samples: int = 20,
-        clip: float = 10.0,
-        variance_scale: float = 1.0,
-    ) -> None:
-        super().__init__(
-            n_arms,
-            outcome_model=outcome_model,
-            propensity_model=propensity_model,
-            refit_every=refit_every,
-            min_samples=min_samples,
-            clip=clip,
-            alpha=1.0,
-        )
-        self.variance_scale = float(variance_scale)
-
-    def choose(self, t: int, history: History) -> int:
-        del history
-        self._t = t
-        if t <= self.n_arms:
-            return t - 1
-        if (t - self._last_refit) >= self.refit_every:
-            self._refit()
-        if len(self.y) < self.min_samples:
-            return np.random.randint(self.n_arms)
-        scale = self.variance_scale * np.sqrt(np.maximum(self.var_hat, 1e-9)) / max(1, len(self.y))
-        samples = np.random.normal(self.mu_hat, scale)
-        return int(np.argmax(samples))
+        return {"mu_hat": self.mu_hat.tolist(), "var_hat": self.var_hat.tolist(),
+                "n": len(self.y)}
