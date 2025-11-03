@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import os
 from typing import Callable, Dict, Sequence
 
@@ -33,10 +34,10 @@ def make_bandit() -> GaussianBandit:
     return GaussianBandit(MEANS, sigma=SIGMA)
 
 
-def policy_factories() -> Dict[str, Callable[[], BasePolicy]]:
+def policy_factories(sigma: float) -> Dict[str, Callable[[], BasePolicy]]:
     prior_means = np.zeros_like(MEANS)
     prior_vars = np.ones_like(MEANS)
-    sigma2 = float(SIGMA ** 2)
+    sigma2 = float(sigma ** 2)
     return {
         "random": lambda: RandomPolicy(seed=12345),
         "etc": lambda: ExploreThenCommit(tau=0.2),
@@ -91,15 +92,29 @@ def plot_pulls(
     plt.close()
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Experiment 1: unstructured bandits baseline.")
+    parser.add_argument("--horizons", type=int, nargs="+", default=[1_000, 10_000], help="Interaction horizons.")
+    parser.add_argument("--seeds", type=int, nargs="+", default=list(range(50)), help="Random seeds to run.")
+    parser.add_argument("--sigma", type=float, default=SIGMA, help="Known Gaussian reward std deviation.")
+    parser.add_argument("--results-dir", type=str, default=RESULTS_DIR, help="Directory to store JSON/plots.")
+    return parser.parse_args()
+
+
 def main() -> None:
-    seeds = list(range(50))
-    horizons = [1_000, 10_000]
-    factories = policy_factories()
+    args = parse_args()
+
+    seeds = args.seeds
+    horizons = args.horizons
+    dirname = args.results_dir
+    ensure_dir(dirname)
+
+    factories = policy_factories(args.sigma)
 
     all_results: Dict[str, Dict[int, Dict[str, np.ndarray | float]]] = {}
     for name, factory in factories.items():
         metrics = run_policy_trials(
-            bandit_factory=make_bandit,
+            bandit_factory=lambda: GaussianBandit(MEANS, sigma=args.sigma),
             policy_factory=factory,
             horizons=horizons,
             seeds=seeds,
@@ -107,7 +122,7 @@ def main() -> None:
         all_results[name] = metrics
         for horizon, payload in metrics.items():
             save_json(
-                os.path.join(RESULTS_DIR, f"{name}_H{horizon}.json"),
+                os.path.join(dirname, f"{name}_H{horizon}.json"),
                 {k: v for k, v in payload.items()},
             )
             mean_regret = float(payload["mean_regret"])
@@ -121,7 +136,7 @@ def main() -> None:
         horizon=plot_horizon,
         curves=curves,
         ci=curve_ci,
-        output_path=os.path.join(RESULTS_DIR, f"regret_H{plot_horizon}.png"),
+        output_path=os.path.join(dirname, f"regret_H{plot_horizon}.png"),
     )
 
     pull_means = {name: np.asarray(results[plot_horizon]["mean_pulls"]) for name, results in all_results.items()}
@@ -129,7 +144,7 @@ def main() -> None:
     plot_pulls(
         means=pull_means,
         ci=pull_ci,
-        output_path=os.path.join(RESULTS_DIR, f"pulls_H{plot_horizon}.png"),
+        output_path=os.path.join(dirname, f"pulls_H{plot_horizon}.png"),
     )
 
 

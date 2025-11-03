@@ -6,7 +6,7 @@ from typing import Dict, Optional, Any
 
 import numpy as np
 
-from Algorithm import BasePolicy, History
+from .Algorithm import BasePolicy, History
 
 
 class LinUCB(BasePolicy):
@@ -129,3 +129,33 @@ class LinThompsonSampling(BasePolicy):
 
     def get_params(self) -> dict:
         return {"sigma2": self.sigma2, "lambda": self.lam}
+    
+class LinTS(BasePolicy):
+    """Gaussian posterior Thompson Sampling for linear bandits."""
+    name = "lin-ts"
+
+    def __init__(self, sigma2: float = 1.0, lam: float = 1.0) -> None:
+        self.sigma2 = float(sigma2)
+        self.lam = float(lam)
+
+    def reset(self, n_arms: int, horizon: int) -> None:
+        del horizon
+        self.n_arms = int(n_arms)
+        # we infer d from the first info["x"] we see
+        self.d = None
+        self.A = None
+        self.b = None
+
+    def choose(self, t: int, history: History) -> int:
+        del t, history
+        if self.d is None:
+            # until we see context, fall back to uniform
+            return np.random.randint(self.n_arms)
+        A_inv = np.linalg.pinv(self.A)
+        mu = A_inv @ self.b
+        theta = np.random.multivariate_normal(mean=mu, cov=self.sigma2 * A_inv)
+        # we need the current context to choose; require caller to pass info["x"] via History? -> we instead
+        # sample each arm's feature through info at update time; for standard contextual bandit you would have X_t,a.
+        # If your setup uses *one* context x_t for the pulled arm only (bandit setting), keep LinUCB for decisions.
+        # For per-arm known features (static X matrix), use the LinearBandit environment below instead:
+        raise NotImplementedError("Use LinearBandit with static features, or extend policy to receive per-arm contexts.")

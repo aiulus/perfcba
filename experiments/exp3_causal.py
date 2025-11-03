@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import os
 from typing import Callable, Dict, Tuple
 
@@ -9,18 +10,18 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-from Algorithm import BasePolicy
-from Bandit import SCMBandit
-from SCM import Intervention, SCM
-from backdoor_bandits import BackdoorTS, BackdoorUCB
-from classical_bandits import GaussianThompsonPolicy, UCB
-from estimators.models import MultinomialLogisticRegression, RidgeOutcomeRegressor
-from estimators.robust import dr_crossfit
-from experiments.common import ensure_dir, run_policy_trials, save_json
+from ..Algorithm import BasePolicy
+from ..Bandit import SCMBandit
+from ..SCM import Intervention, SCM
+from ..backdoor_bandits import BackdoorTS, BackdoorUCB
+from ..classical_bandits import GaussianThompsonPolicy, UCB
+from ..estimators.models import MultinomialLogisticRegression, RidgeOutcomeRegressor
+from ..estimators.robust import dr_crossfit
+from .common import ensure_dir, run_policy_trials, save_json
 
 
-RESULTS_DIR = os.path.join("results", "exp3_causal")
-ensure_dir(RESULTS_DIR)
+DEFAULT_RESULTS_DIR = os.path.join("results", "exp3_causal")
+ensure_dir(DEFAULT_RESULTS_DIR)
 
 
 def build_scm() -> SCM:
@@ -62,15 +63,21 @@ def make_bandit() -> SCMBandit:
     )
 
 
-def policy_factories() -> Dict[str, Callable[[], BasePolicy]]:
+def policy_factories(refit_every: int, clip: float) -> Dict[str, Callable[[], BasePolicy]]:
     prior_means = [0.0, 0.0]
     prior_vars = [1.0, 1.0]
     sigma2 = 0.3 ** 2
     return {
         "ucb": lambda: UCB(schedule="ucb1_alpha", alpha=2.0),
         "thompson-gaussian": lambda: GaussianThompsonPolicy(prior_means, prior_vars, sigma2),
-        "backdoor-ucb": lambda: BackdoorUCB(n_arms=2, refit_every=25, clip=10.0, alpha=1.0),
-        "backdoor-ts": lambda: BackdoorTS(n_arms=2, refit_every=25, clip=10.0, variance_scale=1.0, min_samples=10),
+        "backdoor-ucb": lambda: BackdoorUCB(n_arms=2, refit_every=refit_every, clip=clip, alpha=1.0),
+        "backdoor-ts": lambda: BackdoorTS(
+            n_arms=2,
+            refit_every=refit_every,
+            clip=clip,
+            variance_scale=1.0,
+            min_samples=10,
+        ),
     }
 
 
@@ -110,8 +117,8 @@ def sample_observational_dataset(n_samples: int = 20_000, seed: int = 0) -> Tupl
     return y, a, x, scm
 
 
-def compute_observational_bias() -> Dict[str, Dict[str, float]]:
-    y, a, x, scm = sample_observational_dataset()
+def compute_observational_bias(dataset_size: int, dataset_seed: int) -> Dict[str, Dict[str, float]]:
+    y, a, x, scm = sample_observational_dataset(dataset_size, dataset_seed)
     results: Dict[str, Dict[str, float]] = {}
     naive: Dict[int, float] = {}
     dr_est: Dict[int, float] = {}
@@ -151,10 +158,27 @@ def plot_bias(bias: Dict[str, Dict[str, float]], output_path: str) -> None:
     plt.close()
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Experiment 3: causal bandits with back-door adjustment.")
+    parser.add_argument("--horizons", type=int, nargs="+", default=[1_000, 10_000], help="Interaction horizons.")
+    parser.add_argument("--seeds", type=int, nargs="+", default=list(range(50)), help="Random seeds to run.")
+    parser.add_argument("--refit-every", type=int, default=25, help="Steps between DR refits.")
+    parser.add_argument("--clip", type=float, default=10.0, help="Weight clipping level for DR estimates.")
+    parser.add_argument("--obs-size", type=int, default=20_000, help="Observational dataset sample size.")
+    parser.add_argument("--obs-seed", type=int, default=0, help="Seed for observational dataset sampling.")
+    parser.add_argument("--results-dir", type=str, default=DEFAULT_RESULTS_DIR, help="Directory for outputs.")
+    return parser.parse_args()
+
+
 def main() -> None:
-    seeds = list(range(50))
-    horizons = [1_000, 10_000]
-    factories = policy_factories()
+    args = parse_args()
+
+    seeds = args.seeds
+    horizons = args.horizons
+    dirname = args.results_dir
+    ensure_dir(dirname)
+
+    factories = policy_factories(args.refit_every, args.clip)
 
     all_results: Dict[str, Dict[int, Dict[str, np.ndarray | float]]] = {}
     for name, factory in factories.items():
@@ -167,7 +191,7 @@ def main() -> None:
         all_results[name] = metrics
         for horizon, payload in metrics.items():
             save_json(
-                os.path.join(RESULTS_DIR, f"{name}_H{horizon}.json"),
+                os.path.join(dirname, f"{name}_H{horizon}.json"),
                 {k: v for k, v in payload.items()},
             )
             print(
@@ -182,12 +206,12 @@ def main() -> None:
         horizon=plot_horizon,
         mean_curves=mean_curves,
         ci_curves=ci_curves,
-        output_path=os.path.join(RESULTS_DIR, f"regret_H{plot_horizon}.png"),
+        output_path=os.path.join(dirname, f"regret_H{plot_horizon}.png"),
     )
 
-    bias = compute_observational_bias()
-    save_json(os.path.join(RESULTS_DIR, "observational_bias.json"), bias)
-    plot_bias(bias, os.path.join(RESULTS_DIR, "observational_bias.png"))
+    bias = compute_observational_bias(args.obs_size, args.obs_seed)
+    save_json(os.path.join(dirname, "observational_bias.json"), bias)
+    plot_bias(bias, os.path.join(dirname, "observational_bias.png"))
 
 
 if __name__ == "__main__":

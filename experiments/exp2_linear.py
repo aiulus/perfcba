@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import os
 from typing import Callable, Dict
 
@@ -9,15 +10,15 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-from Algorithm import BasePolicy
-from Bandit import LinearBandit
-from classical_bandits import ExploreThenCommit, UCB
-from experiments.common import ensure_dir, run_policy_trials, save_json
-from linear_bandits import LinThompsonSampling, LinUCB
+from ..Algorithm import BasePolicy
+from ..Bandit import LinearBandit
+from ..classical_bandits import ExploreThenCommit, UCB
+from .common import ensure_dir, run_policy_trials, save_json
+from ..linear_bandits import LinThompsonSampling, LinUCB
 
 
-RESULTS_DIR = os.path.join("results", "exp2_linear")
-ensure_dir(RESULTS_DIR)
+DEFAULT_RESULTS_DIR = os.path.join("results", "exp2_linear")
+ensure_dir(DEFAULT_RESULTS_DIR)
 
 
 FEATURES = np.array(
@@ -38,13 +39,13 @@ def make_bandit() -> LinearBandit:
     return LinearBandit(features=FEATURES, theta=THETA, sigma=SIGMA, provide_features=True)
 
 
-def policy_factories() -> Dict[str, Callable[[], BasePolicy]]:
+def policy_factories(sigma: float) -> Dict[str, Callable[[], BasePolicy]]:
     n_arms = FEATURES.shape[0]
     return {
         "etc": lambda: ExploreThenCommit(tau=0.2),
         "ucb": lambda: UCB(schedule="ucb1_alpha", alpha=2.0),
         "lin-ucb": lambda: LinUCB(FEATURES, alpha=1.5, lam=1.0),
-        "lin-thompson": lambda: LinThompsonSampling(FEATURES, sigma2=SIGMA ** 2, lam=1.0),
+        "lin-thompson": lambda: LinThompsonSampling(FEATURES, sigma2=sigma ** 2, lam=1.0),
     }
 
 
@@ -90,15 +91,29 @@ def plot_estimation_error(
     plt.close()
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Experiment 2: linear bandits with shared structure.")
+    parser.add_argument("--horizons", type=int, nargs="+", default=[1_000, 10_000], help="Interaction horizons.")
+    parser.add_argument("--seeds", type=int, nargs="+", default=list(range(50)), help="Random seeds to run.")
+    parser.add_argument("--sigma", type=float, default=SIGMA, help="Reward noise standard deviation.")
+    parser.add_argument("--results-dir", type=str, default=DEFAULT_RESULTS_DIR, help="Directory for outputs.")
+    return parser.parse_args()
+
+
 def main() -> None:
-    seeds = list(range(50))
-    horizons = [1_000, 10_000]
-    factories = policy_factories()
+    args = parse_args()
+
+    seeds = args.seeds
+    horizons = args.horizons
+    dirname = args.results_dir
+    ensure_dir(dirname)
+
+    factories = policy_factories(args.sigma)
 
     all_results: Dict[str, Dict[int, Dict[str, np.ndarray | float]]] = {}
     for name, factory in factories.items():
         metrics = run_policy_trials(
-            bandit_factory=make_bandit,
+            bandit_factory=lambda: LinearBandit(FEATURES, THETA, sigma=args.sigma, provide_features=True),
             policy_factory=factory,
             horizons=horizons,
             seeds=seeds,
@@ -106,7 +121,7 @@ def main() -> None:
         all_results[name] = metrics
         for horizon, payload in metrics.items():
             save_json(
-                os.path.join(RESULTS_DIR, f"{name}_H{horizon}.json"),
+                os.path.join(dirname, f"{name}_H{horizon}.json"),
                 {k: v for k, v in payload.items()},
             )
             print(
@@ -121,7 +136,7 @@ def main() -> None:
         horizon=plot_horizon,
         mean_curves=mean_curves,
         ci_curves=ci_curves,
-        output_path=os.path.join(RESULTS_DIR, f"regret_H{plot_horizon}.png"),
+        output_path=os.path.join(dirname, f"regret_H{plot_horizon}.png"),
     )
 
     # Estimation error bars (use true means from any policy since identical)
@@ -132,7 +147,7 @@ def main() -> None:
         true_means=np.asarray(true_means),
         mean_errors=mean_errors,
         ci_errors=ci_errors,
-        output_path=os.path.join(RESULTS_DIR, f"mean_error_H{plot_horizon}.png"),
+        output_path=os.path.join(dirname, f"mean_error_H{plot_horizon}.png"),
     )
 
 

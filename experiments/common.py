@@ -62,6 +62,7 @@ def run_policy_trials(
     policy_factory: Callable[[], "BasePolicy"],
     horizons: Sequence[int],
     seeds: Sequence[int],
+    progress: bool = False,
 ) -> Dict[int, Dict[str, np.ndarray | float]]:
     """
     Execute ``policy_factory`` against ``bandit_factory`` across ``horizons`` and ``seeds``.

@@ -1,9 +1,9 @@
 from __future__ import annotations
 from typing import Dict, List, Optional, Any
 import numpy as np
-from Algorithm import BasePolicy, History
-from estimators.models import MultinomialLogisticRegression, RidgeOutcomeRegressor
-from estimators.robust import dr_crossfit, ess
+from .Algorithm import BasePolicy, History
+from .estimators.models import MultinomialLogisticRegression, RidgeOutcomeRegressor
+from .estimators.robust import dr_crossfit, ess
 
 def _info_to_array(info: Optional[Dict[str, Any]]) -> np.ndarray:
     """Flatten info dict (e.g., {'Z': zvec, 'X': x}) into 1D covariate vector."""
