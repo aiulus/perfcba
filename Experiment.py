@@ -30,11 +30,21 @@ class Experiment:
         rng = np.random.default_rng(self.config.seed)
 
         self.bandit.reset(rng)
+        if hasattr(self.bandit, "set_horizon"):
+            try:
+                getattr(self.bandit, "set_horizon")(T)
+            except Exception:
+                pass
         self.policy.reset(self.bandit.n_arms, horizon=T)
 
         actions = np.zeros(T, dtype=int)
         rewards = np.zeros(T, dtype=float)
-        mu_star = np.full(T, self.bandit.best_mean(), dtype=float)
+        mu_star = np.zeros(T, dtype=float)
+        for t in range(1, T + 1):
+            means_t = np.asarray(self.bandit.means_at(t), dtype=float)
+            if means_t.shape[0] != self.bandit.n_arms:
+                raise ValueError("means_at must return an array with one entry per arm")
+            mu_star[t - 1] = float(np.max(means_t))
         obs_log: list[dict] = []
 
         for t in range(1, T + 1):

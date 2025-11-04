@@ -23,11 +23,17 @@ class AbstractBandit(ABC):
     def mean(self, a: int) -> float:
         ...
 
-    def best_arm(self) -> int:
-        return int(np.argmax([self.mean(a) for a in range(self.n_arms)]))
+    def means_at(self, t: int) -> np.ndarray:
+        """Return expected rewards at round ``t`` (default: stationary)."""
 
+        del t
+        return np.array([self.mean(a) for a in range(self.n_arms)], dtype=float)
+
+    def best_arm(self) -> int:
+        return int(np.argmax(self.means_at(1)))
+    
     def best_mean(self) -> float:
-        return float(max(self.mean(a) for a in range(self.n_arms)))
+        return float(np.max(self.means_at(1)))
 
     def info(self) -> Dict[str, Any]:
         return {}
@@ -248,3 +254,163 @@ class SCMBandit(AbstractBandit):
             "feedback": self.feedback,
             "observe": self.observe if not isinstance(self.observe, list) else list(self.observe),
         }
+    
+# -------- Variants for extended experiments --------
+
+
+class StudentTBandit(GaussianBandit):
+    """GaussianBandit with heavy-tailed Student-t observation noise."""
+
+    def __init__(self, means: Sequence[float], sigma: float = 1.0, nu: int = 5) -> None:
+        super().__init__(means, sigma=sigma)
+        if nu <= 2:
+            raise ValueError("nu must be greater than 2 for finite variance")
+        self.nu = int(nu)
+
+    def sample(self, a: int, rng: np.random.Generator) -> float:
+        if not (0 <= a < self.n_arms):
+            raise IndexError("arm out of range")
+        noise = rng.standard_t(self.nu) * self._sigma
+        return float(self._mu[a] + noise)
+
+    def info(self) -> Dict[str, Any]:
+        data = super().info()
+        data["nu"] = self.nu
+        data["type"] = "StudentTGaussian"
+        return data
+
+
+class DriftingGaussianBandit(GaussianBandit):
+    """Gaussian bandit whose means drift linearly over time."""
+
+    def __init__(
+        self,
+        means: Sequence[float],
+        *,
+        drift: Sequence[float],
+        sigma: float = 1.0,
+        horizon: Optional[int] = None,
+    ) -> None:
+        super().__init__(means, sigma=sigma)
+        base = np.asarray(means, dtype=float)
+        drift_vec = np.asarray(drift, dtype=float)
+        if drift_vec.shape != base.shape:
+            raise ValueError("drift vector must match number of arms")
+        self._base_means = base
+        self._drift = drift_vec
+        self._horizon = int(horizon) if horizon is not None and horizon > 0 else None
+        self._t = 0
+        self.is_stationary = False
+
+    def set_horizon(self, horizon: int) -> None:
+        if horizon <= 0:
+            raise ValueError("horizon must be positive")
+        self._horizon = int(horizon)
+
+    def reset(self, rng: np.random.Generator) -> None:
+        del rng
+        self._t = 0
+
+    def means_at(self, t: int) -> np.ndarray:
+        if t <= 0:
+            raise ValueError("t must be >= 1")
+        if self._horizon is not None and self._horizon > 1:
+            frac = min(max(t - 1, 0) / (self._horizon - 1), 1.0)
+        else:
+            frac = float(max(t - 1, 0))
+        return self._base_means + frac * self._drift
+
+    def sample(self, a: int, rng: np.random.Generator) -> float:
+        if not (0 <= a < self.n_arms):
+            raise IndexError("arm out of range")
+        t = self._t + 1
+        means = self.means_at(t)
+        reward = rng.normal(loc=means[a], scale=self._sigma)
+        self._t = t
+        return float(reward)
+
+    def mean(self, a: int) -> float:
+        if not (0 <= a < self.n_arms):
+            raise IndexError("arm out of range")
+        return float(self._base_means[a])
+
+    def info(self) -> Dict[str, Any]:
+        data = super().info()
+        data.update({"type": "DriftingGaussian", "drift": self._drift.tolist(), "horizon": self._horizon})
+        return data
+
+
+class NonlinearBandit(LinearBandit):
+    """LinearBandit variant with quadratic feature misspecification."""
+
+    def __init__(
+        self,
+        features: np.ndarray,
+        theta_linear: np.ndarray,
+        theta_quadratic: np.ndarray,
+        *,
+        sigma: float = 1.0,
+        provide_features: bool = True,
+    ) -> None:
+        self._theta_linear = np.asarray(theta_linear, dtype=float)
+        self._theta_quadratic = np.asarray(theta_quadratic, dtype=float)
+        if self._theta_quadratic.ndim != 1:
+            self._theta_quadratic = self._theta_quadratic.reshape(-1)
+        super().__init__(features=features, theta=self._theta_linear, sigma=sigma, provide_features=provide_features)
+        expected = [self._compute_mean(self.X[a]) for a in range(self.n_arms)]
+        self._means = np.asarray(expected, dtype=float)
+
+    def _feature_map(self, x: np.ndarray) -> np.ndarray:
+        return np.concatenate([x, x * x])
+
+    def _compute_mean(self, x: np.ndarray) -> float:
+        x = np.asarray(x, dtype=float)
+        linear = float(np.dot(self._theta_linear, x))
+        quad = float(np.dot(self._theta_quadratic, self._feature_map(x)))
+        return linear + quad
+
+    def sample(self, a: int, rng: np.random.Generator) -> float | tuple[float, Dict[str, Any]]:
+        if not (0 <= a < self.n_arms):
+            raise IndexError("arm out of range")
+        mean = self._compute_mean(self.X[a])
+        reward = float(rng.normal(loc=mean, scale=self.sigma))
+        if self.provide_features:
+            return reward, {"x": self.X[a].copy()}
+        return reward
+
+    def mean(self, a: int) -> float:
+        if not (0 <= a < self.n_arms):
+            raise IndexError("arm out of range")
+        return float(self._means[a])
+
+    def info(self) -> Dict[str, Any]:
+        data = super().info()
+        data.update({"type": "NonlinearBandit"})
+        return data
+
+
+# -------- Structured / causal examples --------
+
+class TwoArmComplementBernoulli(AbstractBandit):
+    """
+    Simple structured bandit: two arms share a single parameter theta.
+    Arm 0 ~ Ber(theta), Arm 1 ~ Ber(1-theta).
+    """
+    def __init__(self, theta: float) -> None:
+        if not (0.0 <= theta <= 1.0):
+            raise ValueError("theta must be in [0,1].")
+        self.theta = float(theta)
+        self.n_arms = 2
+
+    def reset(self, rng: np.random.Generator) -> None:
+        pass
+
+    def sample(self, a: int, rng: np.random.Generator) -> float:
+        p = self.theta if a == 0 else (1.0 - self.theta)
+        return float(rng.random() < p)
+
+    def mean(self, a: int) -> float:
+        return float(self.theta if a == 0 else (1.0 - self.theta))
+
+    def info(self):
+        return {"type": "TwoArmComplementBernoulli", "theta": self.theta}

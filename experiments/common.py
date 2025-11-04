@@ -4,7 +4,7 @@ import json
 import math
 import os
 import random
-from typing import Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -51,7 +51,7 @@ def _arm_estimates(history: History, bandit: AbstractBandit) -> Tuple[np.ndarray
     empirical = np.full(n_arms, np.nan, dtype=float)
     positive = counts > 0
     empirical[positive] = sums[positive] / counts[positive]
-    true_means = np.array([bandit.mean(a) for a in range(n_arms)], dtype=float)
+    true_means = np.asarray(bandit.means_at(1), dtype=float)
     errors = empirical - true_means
     return counts, empirical, errors
 
@@ -114,7 +114,7 @@ def run_policy_trials(
             if pulls is None:
                 pulls = np.zeros((n_runs, bandit.n_arms), dtype=float)
                 abs_errors = np.zeros((n_runs, bandit.n_arms), dtype=float)
-                true_means = np.array([bandit.mean(a) for a in range(bandit.n_arms)], dtype=float)
+                true_means = np.asarray(bandit.means_at(1), dtype=float)
             pulls[idx, :] = counts
             abs_errors[idx, :] = np.abs(errors)
 
@@ -154,6 +154,94 @@ def run_policy_trials(
         }
 
     return results
+
+
+def sweep_1d(
+    *,
+    property_name: str,
+    values: Sequence[Any],
+    bandit_factory_for: Callable[[Any], BanditFactory],
+    policy_builders: Mapping[str, Callable[[Any], PolFactory]],
+    horizon: int,
+    seeds: Sequence[int],
+    label_fn: Optional[Callable[[Any], str]] = None,
+) -> Tuple[Dict[str, Dict[str, Dict[str, float]]], Dict[str, Any]]:
+    """Run a 1-D sweep returning metrics per policy and property value."""
+
+    if label_fn is None:
+        label_fn = lambda v: str(v)
+
+    summary: Dict[str, Dict[str, Dict[str, float]]] = {
+        name: {} for name in policy_builders.keys()
+    }
+    value_meta: Dict[str, Any] = {"property": property_name, "values": {}}
+
+    for value in values:
+        label = label_fn(value)
+        value_meta["values"][label] = value
+        bandit_factory = bandit_factory_for(value)
+        for name, builder in policy_builders.items():
+            policy_factory = builder(value)
+            metrics = run_policy_trials(
+                bandit_factory=bandit_factory,
+                policy_factory=policy_factory,
+                horizons=[horizon],
+                seeds=seeds,
+            )[horizon]
+            summary[name][label] = {
+                "mean_regret": float(metrics["mean_regret"]),
+                "ci_regret": float(metrics["ci_regret"]),
+            }
+    return summary, value_meta
+
+
+def sweep_2d(
+    *,
+    property_x: str,
+    values_x: Sequence[Any],
+    property_y: str,
+    values_y: Sequence[Any],
+    bandit_factory_for: Callable[[Any, Any], BanditFactory],
+    policy_builders: Mapping[str, Callable[[Any, Any], PolFactory]],
+    horizon: int,
+    seeds: Sequence[int],
+    label_x: Optional[Callable[[Any], str]] = None,
+    label_y: Optional[Callable[[Any], str]] = None,
+) -> Tuple[Dict[str, np.ndarray], Dict[str, List[Any]]]:
+    """Run a 2-D grid sweep returning mean regret tensors per policy."""
+
+    if label_x is None:
+        label_x = lambda v: str(v)
+    if label_y is None:
+        label_y = lambda v: str(v)
+
+    tensors: Dict[str, np.ndarray] = {
+        name: np.zeros((len(values_x), len(values_y)), dtype=float)
+        for name in policy_builders.keys()
+    }
+
+    for ix, vx in enumerate(values_x):
+        for iy, vy in enumerate(values_y):
+            bandit_factory = bandit_factory_for(vx, vy)
+            for name, builder in policy_builders.items():
+                policy_factory = builder(vx, vy)
+                metrics = run_policy_trials(
+                    bandit_factory=bandit_factory,
+                    policy_factory=policy_factory,
+                    horizons=[horizon],
+                    seeds=seeds,
+                )[horizon]
+                tensors[name][ix, iy] = float(metrics["mean_regret"])
+
+    metadata = {
+        "property_x": property_x,
+        "values_x": [label_x(v) for v in values_x],
+        "raw_x": list(values_x),
+        "property_y": property_y,
+        "values_y": [label_y(v) for v in values_y],
+        "raw_y": list(values_y),
+    }
+    return tensors, metadata
 
 
 def save_json(path: str, payload: Mapping[str, object]) -> None:
