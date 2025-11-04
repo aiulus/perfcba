@@ -70,6 +70,3 @@ For every sweep, the runner:
 4. Emits companion PDF plots (e.g., `sigma_curve.pdf`) comparing algorithms over the swept property.
 
 Override `--results-dir` to redirect outputs; existing directories are created on demand.
-
-```
-```
