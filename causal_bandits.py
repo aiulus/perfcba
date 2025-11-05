@@ -1,57 +1,52 @@
-"""Causal bandit algorithms from Lattimore, Lattimore, and Reid (2016).
+"""Reference implementations of causal bandit algorithms.
 
-This module provides reference implementations of the two main algorithms in
-"Parallel Bandits: Understanding and Exploiting Causal Structures".  The goal is
-simple regret minimisation when interacting with a structural causal model with a
-known graph.
+This module collects faithful Python translations of the algorithms presented in
+*Learning Good Interventions via Causal Inference* (Lattimore, Lattimore and
+Reid, 2016) and *Structural Causal Bandits: Where to Intervene?* (Lee and
+Bareinboim, 2018).  The goal is to expose the exact decision rules used in the
+original works so that they can be re-used in different experimental harnesses.
 
-The algorithms are provided in a lightweight, simulator-agnostic style so they
-can be plugged into different experimental harnesses.  Users supply callables
-for drawing samples under the required interventions as well as the structural
-information (for Algorithm 2).
+The implementation is intentionally close to the pseudo-code and public
+reference implementations released by the authors.  Only light engineering
+wrapping is applied (type annotations, argument validation and numerical
+safeguards) to make the routines easier to compose with the rest of the code
+base while staying behaviourally equivalent to the source material.
 """
 
 from __future__ import annotations
 
 import collections
+import itertools
 import math
+import numbers
 import random
-from typing import Any, Callable, Dict, Iterable, List, MutableMapping, Sequence, Tuple, Union
+from dataclasses import dataclass, field
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    FrozenSet,
+    Iterable,
+    List,
+    Mapping,
+    MutableMapping,
+    Optional,
+    Protocol,
+    Sequence,
+    Set,
+    Tuple,
+    Union,
+)
+
+import numpy as np
 
 
-__all__ = [
-    "m_of_q",
-    "parallel_bandit_algorithm",
-    "compute_Q",
-    "compute_m_eta",
-    "choose_truncation_B",
-    "general_causal_bandit_algorithm",
-    "approx_minimize_m_eta",
-]
-
-
-# ---------------------------------------------------------------------------
-# Algorithm 1 utilities
-# ---------------------------------------------------------------------------
+# =============================================================================
+# Algorithms from Lattimore, Lattimore & Reid (2016)
+# =============================================================================
 
 def m_of_q(q: Sequence[float]) -> int:
-    """Return the difficulty index :math:`m(q)` for a Bernoulli vector ``q``.
-
-    The index is defined in Lattimore et al. (2016, Definition 3) as::
-
-        m(q) = min { tau in {2, …, N} : |I_tau| <= tau },
-        I_tau = { i : min(q_i, 1 - q_i) < 1 / tau }.
-
-    Parameters
-    ----------
-    q:
-        Empirical means :math:`q_i = P(X_i = 1)` for the observational regime.
-
-    Returns
-    -------
-    int
-        The smallest admissible :math:`tau`, bounded above by ``len(q)``.
-    """
+    """Return the difficulty index :math:`m(q)` for a Bernoulli vector ``q``."""
 
     n = len(q)
     if n == 0:
@@ -67,45 +62,16 @@ def m_of_q(q: Sequence[float]) -> int:
 def parallel_bandit_algorithm(
     T: int,
     N: int,
-    env_pull_do_empty: Callable[[], Tuple[Sequence[int], int]],
-    env_pull_do_single: Callable[[int, int], int],
-)  -> Tuple[Union[str, Tuple[int, int]], Dict[Tuple[int, int], float]]:
-    """Implementation of Algorithm 1 (Parallel Bandit) from LLR16.
-
-    Parameters
-    ----------
-    T:
-        Total interaction budget.
-    N:
-        Number of parents of the reward node (binary variables).
-    env_pull_do_empty:
-        Callable returning ``(x, y)`` where ``x`` is the full :math:`{0,1}^N`
-        vector sampled under the empty intervention and ``y`` is the reward.
-    env_pull_do_single:
-        Callable returning a reward when the intervention ``do(X_i = j)`` is
-        applied.
-
-    Returns
-    -------
-    best_arm:
-        Either the string ``"do()"`` for the empty intervention or the tuple
-        ``(i, j)`` describing the recommended single-variable intervention.
-    mu_hat:
-        Dictionary of empirical means for each single-variable intervention.
-
-    Notes
-    -----
-    The algorithm splits the budget into an observational phase followed by a
-    targeted phase focused on "rare" arms.  The definition of rare arms follows
-    the paper exactly and is governed by ``m_of_q`` above.
-    """
+    env_pull_do_empty: Callable[[], Tuple[Sequence[int], float]],
+    env_pull_do_single: Callable[[int, int], float],
+) -> Tuple[Union[str, Tuple[int, int]], Dict[Tuple[int, int], float]]:
+    """Implementation of Algorithm 1 (Parallel Bandit) from LLR16."""
 
     if T <= 0:
         raise ValueError("Budget T must be positive")
     if N <= 0:
         raise ValueError("Number of parents N must be positive")
 
-    # Phase split (Algorithm 1, lines 2-3)
     T_obs = T // 2
     T_tar = T - T_obs
 
@@ -113,7 +79,6 @@ def parallel_bandit_algorithm(
     sumY_a: Dict[Tuple[int, int], float] = {(i, j): 0.0 for i in range(N) for j in (0, 1)}
     baseline_sum = 0.0
 
-    # Phase 1: draw T_obs samples under do() and reuse occurrences of X_i=j
     for _ in range(T_obs):
         x, y = env_pull_do_empty()
         if len(x) != N:
@@ -126,7 +91,6 @@ def parallel_bandit_algorithm(
             count_a[(i, j)] += 1
             sumY_a[(i, j)] += y
 
-    # Empirical frequencies (Algorithm 1, line 8)
     p_hat: Dict[Tuple[int, int], float] = {}
     for i in range(N):
         for j in (0, 1):
@@ -135,7 +99,6 @@ def parallel_bandit_algorithm(
     q_hat = [p_hat[(i, 1)] for i in range(N)]
     m_hat = m_of_q(q_hat) if q_hat else 2
 
-    # Identify rare arms (Algorithm 1, line 9)
     denominator = max(2, m_hat)
     rare_arms = [
         (i, j) for (i, j), probability in p_hat.items() if probability <= 1.0 / denominator
@@ -179,20 +142,12 @@ def parallel_bandit_algorithm(
     return best_arm, mu_hat
 
 
-# ---------------------------------------------------------------------------
-# Algorithm 2 utilities
-# ---------------------------------------------------------------------------
-
 def compute_Q(
     eta: MutableMapping[Any, float],
     P_Pa_given_a: MutableMapping[Any, Callable[[Tuple[Any, ...]], float]],
     support_PaY: Iterable[Tuple[Any, ...]],
 ) -> Dict[Tuple[Any, ...], float]:
     """Return the mixture distribution ``Q`` over parent assignments.
-
-    The mixture is defined as ``Q(x) = sum_a eta[a] * P(Pa_Y = x | a)``.  The
-    support needs to cover every parent assignment with positive probability for
-    any considered arm, otherwise the importance weights would be undefined.
     """
 
     Q: Dict[Tuple[Any, ...], float] = collections.defaultdict(float)
@@ -215,9 +170,9 @@ def compute_m_eta(
         for x in support_PaY:
             p_ax = P_Pa_given_a[arm](x)
             q_x = Q[x]
-            if p_ax == 0:
+            if p_ax == 0.0:
                 continue
-            if q_x <= 0:
+            if q_x <= 0.0:
                 raise ValueError(
                     "Support mismatch: Q(x) is zero while P(Pa_Y=x|a) is positive."
                 )
@@ -249,7 +204,7 @@ def general_causal_bandit_algorithm(
     P_Pa_given_a: MutableMapping[Any, Callable[[Tuple[Any, ...]], float]],
     support_PaY: Iterable[Tuple[Any, ...]],
     extract_PaY: Callable[[Any], Tuple[Any, ...]],
-    env_pull: Callable[[Any], Tuple[Any, int]],
+    env_pull: Callable[[Any], Tuple[Any, float]],
     adaptive_B: bool = False,
     rng: random.Random | None = None,
 ) -> Tuple[Any, Dict[Any, float]]:
@@ -275,7 +230,7 @@ def general_causal_bandit_algorithm(
     truncation = math.inf if adaptive_B else base_B
 
     observations: List[Tuple[Any, ...]] = []
-    rewards: List[int] = []
+    rewards: List[float] = []
 
     # Fixed design sampling (Algorithm 2, lines 4-6)
     for _ in range(T):
@@ -289,7 +244,7 @@ def general_causal_bandit_algorithm(
                 break
         x_full, y = env_pull(chosen_arm)
         observations.append(extract_PaY(x_full))
-        rewards.append(y)
+        rewards.append(float(y))
 
     # Post-processing: compute truncated importance-weighted estimates
     mu_hat: Dict[Any, float] = {}
@@ -298,7 +253,7 @@ def general_causal_bandit_algorithm(
         for x_pa, y in zip(observations, rewards):
             p_ax = P_Pa_given_a[arm](x_pa)
             q_x = Q[x_pa]
-            if q_x <= 0:
+            if q_x <= 0.0:
                 raise ValueError(
                     "Support mismatch: encountered Pa_Y value with zero mixture probability."
                 )
@@ -312,7 +267,7 @@ def general_causal_bandit_algorithm(
 
 
 # ---------------------------------------------------------------------------
-# Helper routines
+# Helper routines used by approx_minimize_m_eta
 # ---------------------------------------------------------------------------
 
 def _project_to_simplex(v: Dict[Any, float]) -> Dict[Any, float]:
@@ -379,9 +334,9 @@ def approx_minimize_m_eta(
             for x in support_PaY:
                 p_ax = P_Pa_given_a[arm](x)
                 q_x = Q[x]
-                if p_ax == 0:
+                if p_ax == 0.0:
                     continue
-                if q_x <= 0:
+                if q_x <= 0.0:
                     raise ValueError(
                         "Support mismatch: Q(x) is zero while P(Pa_Y=x|a) is positive."
                     )
@@ -394,7 +349,7 @@ def approx_minimize_m_eta(
         for x in support_PaY:
             p_worst = P_Pa_given_a[worst_arm](x)
             denom = Q[x]
-            if denom <= 0:
+            if denom <= 0.0:
                 continue
             for arm in A:
                 p_ax = P_Pa_given_a[arm](x)
@@ -407,25 +362,11 @@ def approx_minimize_m_eta(
 
     return eta
 
-"""Implementations of causal bandit utilities from Lee & Bareinboim (2018).
 
-The functions in this module follow the pseudocode specification provided in the
-prompt.  They offer a direct translation of the structural causal bandit
-algorithms into executable Python that interoperates with the rest of the
-repository.  The implementation intentionally mirrors the notation used in the
-paper so that it stays close to the theory while remaining practical.
-"""
-from typing import Callable, Dict, FrozenSet, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
+# =============================================================================
+# Algorithms from Lee & Bareinboim (2018)
+# =============================================================================
 
-import itertools
-import math
-import numbers
-import numpy as np
-
-
-# ---------------------------------------------------------------------------
-# Helper utilities
-# ---------------------------------------------------------------------------
 
 def _node_set(graph) -> Set[str]:
     """Return the set of node names for *graph*.
@@ -496,7 +437,12 @@ def MISs(graph, outcome: str) -> FrozenSet[FrozenSet[str]]:
     return frozenset(results)
 
 
-def _subMISs(graph, outcome: str, chosen: FrozenSet[str], remaining: Sequence[str]) -> Set[FrozenSet[str]]:
+def _subMISs(
+    graph,
+    outcome: str,
+    chosen: FrozenSet[str],
+    remaining: Sequence[str],
+) -> Set[FrozenSet[str]]:   
     """Recursive helper implementing the MIS enumeration logic."""
 
     out: Set[FrozenSet[str]] = {chosen}
@@ -568,7 +514,12 @@ def POMISs(graph, outcome: str) -> Set[FrozenSet[str]]:
     return { _ensure_frozenset(x) for x in result }
 
 
-def _subPOMISs(graph, outcome: str, ordered_vars: Sequence[str], obs: Set[str]) -> Set[FrozenSet[str]]:
+def _subPOMISs(
+    graph,
+    outcome: str,
+    ordered_vars: Sequence[str],
+    obs: Set[str],
+) -> Set[FrozenSet[str]]:   
     """Depth-first generation helper mirroring Algorithm 1 from the paper."""
 
     if not ordered_vars:
@@ -593,20 +544,11 @@ def _subPOMISs(graph, outcome: str, ordered_vars: Sequence[str], obs: Set[str]) 
 # Converting SCMs into bandit machines
 # ---------------------------------------------------------------------------
 
-def SCM_to_bandit_machine(model, outcome: str = "Y") -> Tuple[Tuple[float, ...], Dict[int, Dict[str, numbers.Number]]]:
-    """Enumerate all interventional arms and their expected rewards.
-
-    The routine assumes that ``model`` exposes the following attributes/methods:
-
-    ``model.G``
-        Underlying causal diagram (used purely for arm bookkeeping).
-    ``model.D``
-        Mapping from node -> iterable domain of the node.
-    ``model.query(vars, intervention=dict)``
-        Returns a factor for the joint distribution of ``vars`` under the given
-        hard intervention.  The factor should index outcomes via tuples, e.g.
-        ``factor[(0,)]`` for a single binary variable.
-    """
+def SCM_to_bandit_machine(
+    model,
+    outcome: str = "Y",
+) -> Tuple[Tuple[float, ...], Dict[int, Dict[str, numbers.Number]]]:
+    """Enumerate all interventional arms and their expected rewards."""
 
     graph = model.G
     nodes = sorted(_node_set(graph) - {outcome})
@@ -634,19 +576,25 @@ def SCM_to_bandit_machine(model, outcome: str = "Y") -> Tuple[Tuple[float, ...],
 # Arm filters
 # ---------------------------------------------------------------------------
 
-def arms_of(kind: str, arm_settings: Mapping[int, Mapping[str, numbers.Number]], graph, outcome: str) -> Tuple[int, ...]:
-    """Return the arm indices matching ``kind``.
-
-    ``kind`` may be one of ``{"POMIS", "MIS", "Brute-force", "All-at-once"}``.
-    """
+def arms_of(
+    kind: str,
+    arm_settings: Mapping[int, Mapping[str, numbers.Number]],
+    graph,
+    outcome: str,
+) -> Tuple[int, ...]:
+    """Return the arm indices matching ``kind``."""
 
     kind = kind.lower()
     if kind == "pomis":
         pomis_sets = POMISs(graph, outcome)
-        return tuple(i for i, setting in arm_settings.items() if frozenset(setting.keys()) in pomis_sets)
+        return tuple(
+            i for i, setting in arm_settings.items() if frozenset(setting.keys()) in pomis_sets
+        )
     if kind == "mis":
         mis_sets = MISs(graph, outcome)
-        return tuple(i for i, setting in arm_settings.items() if frozenset(setting.keys()) in mis_sets)
+        return tuple(
+            i for i, setting in arm_settings.items() if frozenset(setting.keys()) in mis_sets
+        )
     if kind == "all-at-once":
         full = _node_set(graph) - {outcome}
         return tuple(i for i, setting in arm_settings.items() if set(setting.keys()) == full)
@@ -728,8 +676,10 @@ def KL_UCB_run(
 
     upper_bounds = np.zeros(num_arms, dtype=float)
     for arm in range(num_arms):
-        if counts[arm] > 0:
-            upper_bounds[arm] = sup_KL(estimates[arm], exploration_schedule(warm) / counts[arm])
+        if counts[arm] > 0.0:
+            upper_bounds[arm] = sup_KL(
+                estimates[arm], exploration_schedule(warm) / counts[arm]
+            )
         else:
             upper_bounds[arm] = 1.0
 
@@ -740,8 +690,9 @@ def KL_UCB_run(
         rewards[t] = reward
         counts[arm] += 1.0
         estimates[arm] += (reward - estimates[arm]) / counts[arm]
-        upper_bounds[arm] = sup_KL(estimates[arm], exploration_schedule(t + 1) / counts[arm])
-
+        upper_bounds[arm] = sup_KL(
+            estimates[arm], exploration_schedule(t + 1) / counts[arm]
+        )
     return pulls, rewards
 
 
@@ -775,7 +726,9 @@ def Thompson_run(
     rng = np.random.default_rng()
 
     for t in range(horizon):
-        theta = np.array([rng.beta(successes[i] + 1.0, failures[i] + 1.0) for i in range(num_arms)])
+        theta = np.array(
+            [rng.beta(successes[i] + 1.0, failures[i] + 1.0) for i in range(num_arms)]
+        )
         arm = allowed[rand_argmax(theta[list(allowed)])]
         reward = float(rng.random() <= mu_true[arm])
         pulls[t] = arm
@@ -787,38 +740,9 @@ def Thompson_run(
 
     return pulls, rewards
 
-
-__all__ = [
-    "MISs",
-    "POMISs",
-    "MUCT",
-    "IB",
-    "MUCT_IB",
-    "SCM_to_bandit_machine",
-    "arms_of",
-    "KL",
-    "sup_KL",
-    "KL_UCB_run",
-    "Thompson_run",
-    "rand_argmax",
-]
-
-"""Implementations of causal bandit primitives and the RAPS algorithms.
-
-This module follows the pseudo-code provided in the prompt which mirrors the
-algorithms from *Causal Bandits without Graph Learning*.  It supplies helper
-utilities for working with probabilistic causal models (PCMs) together with
-implementations of the finite-sample RAPS procedure (Algorithm 4), the
-conceptual single-parent variant (Algorithm 1), and a UCB wrapper that uses the
-identified parents for action selection.
-"""
-
-import math
-import random
-from dataclasses import dataclass, field
-from itertools import product
-from typing import Callable, Dict, Iterable, List, MutableMapping, Optional, Protocol, Sequence, Set
-
+# =============================================================================
+# RAPS primitives (used for follow-up experiments)
+# =============================================================================
 
 class PCM(Protocol):
     """Protocol describing the probabilistic causal model interface.
@@ -841,8 +765,6 @@ class PCM(Protocol):
 
 
 def empirical_mean_R(samples: Sequence[MutableMapping[str, int]], reward_node: str) -> float:
-    """Compute the empirical mean of the reward node from a batch of samples."""
-
     if not samples:
         raise ValueError("At least one sample is required to compute the empirical mean.")
 
@@ -853,8 +775,6 @@ def empirical_mean_R(samples: Sequence[MutableMapping[str, int]], reward_node: s
 
 
 def empirical_marginal(samples: Sequence[MutableMapping[str, int]], node: str, K: int) -> List[float]:
-    """Estimate the marginal distribution Pr(node = v) for v in {0, ..., K-1}."""
-
     if K <= 0:
         raise ValueError("Domain size K must be positive.")
     if not samples:
@@ -864,7 +784,9 @@ def empirical_marginal(samples: Sequence[MutableMapping[str, int]], node: str, K
     for sample in samples:
         value = sample[node]
         if not 0 <= value < K:
-            raise ValueError(f"Sampled value {value} for node {node} is outside of the expected domain.")
+            raise ValueError(
+                f"Sampled value {value} for node {node} is outside of the expected domain."
+            )
         counts[value] += 1.0
 
     total = float(len(samples))
@@ -896,7 +818,7 @@ def all_assignments(nodes: Iterable[str], K: int) -> Iterable[Dict[str, int]]:
         yield {}
         return
 
-    for values in product(range(K), repeat=len(node_list)):
+    for values in itertools.product(range(K), repeat=len(node_list)):
         assignment = {node: value for node, value in zip(node_list, values)}
         yield assignment
 
@@ -927,8 +849,8 @@ def compute_budget(n: int, K: int, params: RAPSParams) -> int:
         raise ValueError("Domain size K must be positive.")
 
     log = math.log
-    term_reward = 32.0 / (params.Delta ** 2) * log(8 * n * K * ((K + 1) ** n) / params.delta)
-    term_dists = 8.0 / (params.eps ** 2) * log(8 * (n ** 2) * (K ** 2) * ((K + 1) ** n) / params.delta)
+    term_reward = 32.0 / (params.Delta**2) * log(8 * n * K * ((K + 1) ** n) / params.delta)
+    term_dists = 8.0 / (params.eps**2) * log(8 * (n**2) * (K**2) * ((K + 1) ** n) / params.delta)
     return math.ceil(max(term_reward, term_dists))
 
 
@@ -999,8 +921,6 @@ def RAPS_single_parent_conceptual(
 
     candidate_set: Set[str] = set(V)
     fixed_parents: Set[str] = set() if parents_found is None else set(parents_found)
-    if not candidate_set:
-        return None
 
     B = compute_budget(len(pcm.V), pcm.K, params)
 
@@ -1009,7 +929,9 @@ def RAPS_single_parent_conceptual(
             return None
         X = random.choice(list(candidates))
         if parent_is_in_descendants_of_X(pcm, X, fixed_parents, pcm.K, B, params.Delta):
-            descendants = descendants_in_C(pcm, X, candidates, fixed_parents, pcm.K, B, params.eps)
+            descendants = descendants_in_C(
+                pcm, X, candidates, fixed_parents, pcm.K, B, params.eps
+            )
             P_hat = rec(descendants - {X})
             return X if P_hat is None else P_hat
         descendants = descendants_in_C(pcm, X, candidates, fixed_parents, pcm.K, B, params.eps)
@@ -1101,7 +1023,15 @@ def RAPS_multi_parent(pcm: PCM, params: RAPSParams) -> Set[str]:
             break
         parents.add(parent)
 
-        descendants = descendants_in_C(pcm, parent, set(remaining), parents, pcm.K, compute_budget(len(pcm.V), pcm.K, params), params.eps)
+        descendants = descendants_in_C(
+            pcm,
+            parent,
+            set(remaining),
+            parents,
+            pcm.K,
+            compute_budget(len(pcm.V), pcm.K, params),
+            params.eps,
+        )
         banned |= descendants
 
     return parents
@@ -1120,7 +1050,12 @@ class UCBProtocol(Protocol):
 class RAPSPlusUCB:
     """Bandit wrapper that combines RAPS parent discovery with a UCB policy."""
 
-    def __init__(self, pcm: PCM, params: RAPSParams, ucb_factory: Callable[[int], UCBProtocol]):
+    def __init__(
+        self,
+        pcm: PCM,
+        params: RAPSParams,
+        ucb_factory: Callable[[int], UCBProtocol],
+    ) -> None: 
         self.pcm = pcm
         self.params = params
         self.ucb_factory = ucb_factory
@@ -1148,3 +1083,41 @@ class RAPSPlusUCB:
         assert self.ucb is not None
         self.ucb.update(reward)
         return reward
+    
+    __all__ = [
+    # LLR16
+    "m_of_q",
+    "parallel_bandit_algorithm",
+    "compute_Q",
+    "compute_m_eta",
+    "choose_truncation_B",
+    "general_causal_bandit_algorithm",
+    "approx_minimize_m_eta",
+    # Lee & Bareinboim 2018
+    "MISs",
+    "POMISs",
+    "MUCT",
+    "IB",
+    "MUCT_IB",
+    "SCM_to_bandit_machine",
+    "arms_of",
+    "KL",
+    "sup_KL",
+    "KL_UCB_run",
+    "Thompson_run",
+    "rand_argmax",
+    # RAPS primitives
+    "PCM",
+    "empirical_mean_R",
+    "empirical_marginal",
+    "l1_dist",
+    "all_assignments",
+    "RAPSParams",
+    "compute_budget",
+    "parent_is_in_descendants_of_X",
+    "descendants_in_C",
+    "RAPS_single_parent_conceptual",
+    "raps_full",
+    "RAPS_multi_parent",
+    "RAPSPlusUCB",
+]
