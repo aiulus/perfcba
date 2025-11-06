@@ -6,11 +6,20 @@ from .estimators.models import MultinomialLogisticRegression, RidgeOutcomeRegres
 from .estimators.robust import dr_crossfit, ess
 
 def _info_to_array(info: Optional[Dict[str, Any]]) -> np.ndarray:
-    """Flatten info dict (e.g., {'Z': zvec, 'X': x}) into 1D covariate vector."""
+    """Flatten info dict (e.g., {'Z': zvec, 'X': x}) into 1D covariate vector.
+
+    Drops obvious post-treatment entries (e.g., the logged action ``T``) so the
+    covariate vector only contains pre-treatment information.
+    """
     if not info:
         return np.zeros(0, dtype=float)
     parts: List[np.ndarray] = []
     for k in sorted(info.keys()):
+        if isinstance(k, str):
+            key = k.strip().upper()
+            # Skip treatment/action keys to avoid post-treatment conditioning.
+            if key in {"T", "A", "ARM", "ACTION", "TREATMENT"} or key.startswith("DO("):
+                continue
         v = info[k]
         arr = np.atleast_1d(np.asarray(v, dtype=float))
         parts.append(arr.ravel())
@@ -40,9 +49,13 @@ class BackdoorUCB(BasePolicy):
         self._last_refit = 0
         self.mu_hat = np.zeros(self.n_arms, dtype=float)
         self.var_hat = np.ones(self.n_arms, dtype=float)
+        self._ess = np.zeros(self.n_arms, dtype=float)
+        self._min_prop = np.full(self.n_arms, np.nan, dtype=float)
 
     def _refit(self) -> None:
         if len(self.y) < self.n_arms:
+            self._ess.fill(0.0)
+            self._min_prop.fill(np.nan)
             return
         X = np.vstack(self.X) if self.X else np.zeros((0, 0), dtype=float)
         a = np.asarray(self.a, dtype=int)
@@ -50,7 +63,7 @@ class BackdoorUCB(BasePolicy):
         prop = MultinomialLogisticRegression(n_classes=self.n_arms)
         out = RidgeOutcomeRegressor(l2=1e-2)
         for arm in range(self.n_arms):
-            mean_arm, _, dr_vals = dr_crossfit(
+            mean_arm, weights, dr_vals = dr_crossfit(
                 y,
                 a,
                 X,
@@ -63,6 +76,16 @@ class BackdoorUCB(BasePolicy):
             self.mu_hat[arm] = mean_arm
             # conservative variance proxy
             self.var_hat[arm] = float(np.var(np.asarray(dr_vals), ddof=1)) if len(dr_vals) > 1 else 1.0
+            ess_val = ess(weights)
+            if ess_val < 0:
+                ess_val = 0.0
+            self._ess[arm] = float(ess_val)
+            positive = weights[weights > 0]
+            if positive.size:
+                props = 1.0 / positive
+                self._min_prop[arm] = float(np.min(props))
+            else:
+                self._min_prop[arm] = np.nan
         self._last_refit = self._t
 
     def choose(self, t: int, history: History) -> int:
@@ -83,8 +106,13 @@ class BackdoorUCB(BasePolicy):
         self.y.append(float(x))
 
     def diagnostics(self) -> Dict[str, Any]:
-        return {"mu_hat": self.mu_hat.tolist(), "var_hat": self.var_hat.tolist(),
-                "n": len(self.y), "ess": None}
+        return {
+            "mu_hat": self.mu_hat.tolist(),
+            "var_hat": self.var_hat.tolist(),
+            "n": len(self.y),
+            "ess": self._ess.tolist(),
+            "min_prop": self._min_prop.tolist(),
+        }
 
 class BackdoorTS(BasePolicy):
     """Thompson sampling over DR means with variance scaling."""
@@ -108,9 +136,13 @@ class BackdoorTS(BasePolicy):
         self._last_refit = 0
         self.mu_hat = np.zeros(self.n_arms, dtype=float)
         self.var_hat = np.ones(self.n_arms, dtype=float)
+        self._ess = np.zeros(self.n_arms, dtype=float)
+        self._min_prop = np.full(self.n_arms, np.nan, dtype=float)
 
     def _refit(self) -> None:
         if len(self.y) < self.n_arms:
+            self._ess.fill(0.0)
+            self._min_prop.fill(np.nan)
             return
         X = np.vstack(self.X) if self.X else np.zeros((0, 0), dtype=float)
         a = np.asarray(self.a, dtype=int)
@@ -118,7 +150,7 @@ class BackdoorTS(BasePolicy):
         prop = MultinomialLogisticRegression(n_classes=self.n_arms)
         out = RidgeOutcomeRegressor(l2=1e-2)
         for arm in range(self.n_arms):
-            mean_arm, _, dr_vals = dr_crossfit(
+            mean_arm, weights, dr_vals = dr_crossfit(
                 y,
                 a,
                 X,
@@ -130,6 +162,16 @@ class BackdoorTS(BasePolicy):
             )
             self.mu_hat[arm] = mean_arm
             self.var_hat[arm] = float(np.var(np.asarray(dr_vals), ddof=1)) if len(dr_vals) > 1 else 1.0
+            ess_val = ess(weights)
+            if ess_val < 0:
+                ess_val = 0.0
+            self._ess[arm] = float(ess_val)
+            positive = weights[weights > 0]
+            if positive.size:
+                props = 1.0 / positive
+                self._min_prop[arm] = float(np.min(props))
+            else:
+                self._min_prop[arm] = np.nan
         self._last_refit = self._t
 
     def choose(self, t: int, history: History) -> int:
@@ -153,5 +195,10 @@ class BackdoorTS(BasePolicy):
         self.y.append(float(x))
 
     def diagnostics(self) -> Dict[str, Any]:
-        return {"mu_hat": self.mu_hat.tolist(), "var_hat": self.var_hat.tolist(),
-                "n": len(self.y)}
+        return {
+            "mu_hat": self.mu_hat.tolist(),
+            "var_hat": self.var_hat.tolist(),
+            "n": len(self.y),
+            "ess": self._ess.tolist(),
+            "min_prop": self._min_prop.tolist(),
+        }
