@@ -235,6 +235,9 @@ class SCMBandit(AbstractBandit):
         y = float(vals[self.reward_node])
         if self.feedback == "causal":
             obs = {k: v for k, v in vals.items() if k != self.reward_node}
+            treated_nodes = set(interv.hard.keys()) | set(interv.soft.keys())
+            if treated_nodes:
+                obs = {k: v for k, v in obs.items() if k not in treated_nodes}
             return y, obs
         return y
 

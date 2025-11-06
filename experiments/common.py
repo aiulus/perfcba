@@ -8,6 +8,7 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Seque
 
 import numpy as np
 
+from .. import metrics
 from ..Experiment import Experiment, RunConfig
 from ..Profiler import Profiler
 from ..Algorithm import History
@@ -63,6 +64,7 @@ def run_policy_trials(
     horizons: Sequence[int],
     seeds: Sequence[int],
     progress: bool = False,
+    epsilon: float = 1.0,
 ) -> Dict[int, Dict[str, np.ndarray | float]]:
     """
     Execute ``policy_factory`` against ``bandit_factory`` across ``horizons`` and ``seeds``.
@@ -82,6 +84,12 @@ def run_policy_trials(
         - ``mean_abs_error``: shape (n_arms,)
         - ``ci_abs_error``: shape (n_arms,)
         - ``true_means``: shape (n_arms,)
+        - ``mean_simple_regret``: scalar
+        - ``ci_simple_regret``: scalar
+        - ``mean_aurc``: scalar (area under the cumulative regret curve)
+        - ``ci_aurc``: scalar
+        - ``mean_time_to_epsilon``: scalar (first t with average regret <= ``epsilon``; NaN if never achieved)
+        - ``ci_time_to_epsilon``: scalar
     """
 
     horizons = list(horizons)
@@ -94,6 +102,9 @@ def run_policy_trials(
         pulls: Optional[np.ndarray] = None
         abs_errors: Optional[np.ndarray] = None
         total_regrets: List[float] = []
+        aurc_vals = np.zeros(n_runs, dtype=float)
+        time_to_eps_vals = np.full(n_runs, np.nan, dtype=float)
+        simple_regrets = np.zeros(n_runs, dtype=float)
         true_means: Optional[np.ndarray] = None
 
         for idx, seed in enumerate(seeds):
@@ -104,6 +115,10 @@ def run_policy_trials(
             run = Experiment(bandit, policy, RunConfig(T=horizon, seed=seed)).run()
             profiler = Profiler(run, bandit)
             curve = profiler.regret_curve()
+            aurc_vals[idx] = metrics.area_under_regret_curve(curve)
+            t_eps = metrics.time_to_epsilon_optimal(curve, epsilon=epsilon)
+            time_to_eps_vals[idx] = float(t_eps) if t_eps is not None else math.nan
+            simple_regrets[idx] = profiler.simple_regret()
 
             if regret_curves is None:
                 regret_curves = np.zeros((n_runs, horizon), dtype=float)
@@ -140,6 +155,13 @@ def run_policy_trials(
                     ci_abs_err[j] = 1.96 * se
 
         mean_regret, ci_regret = mean_confidence_interval(total_regrets)
+        mean_simple_regret, ci_simple_regret = mean_confidence_interval(simple_regrets.tolist())
+        mean_aurc, ci_aurc = mean_confidence_interval(aurc_vals.tolist())
+        mask_time = ~np.isnan(time_to_eps_vals)
+        if np.count_nonzero(mask_time):
+            mean_time_to_eps, ci_time_to_eps = mean_confidence_interval(time_to_eps_vals[mask_time].tolist())
+        else:
+            mean_time_to_eps, ci_time_to_eps = math.nan, 0.0
 
         results[horizon] = {
             "mean_regret": mean_regret,
@@ -151,6 +173,12 @@ def run_policy_trials(
             "mean_abs_error": mean_abs_err,
             "ci_abs_error": ci_abs_err,
             "true_means": true_means,
+            "mean_simple_regret": mean_simple_regret,
+            "ci_simple_regret": ci_simple_regret,
+            "mean_aurc": mean_aurc,
+            "ci_aurc": ci_aurc,
+            "mean_time_to_epsilon": mean_time_to_eps,
+            "ci_time_to_epsilon": ci_time_to_eps,
         }
 
     return results
@@ -191,6 +219,12 @@ def sweep_1d(
             summary[name][label] = {
                 "mean_regret": float(metrics["mean_regret"]),
                 "ci_regret": float(metrics["ci_regret"]),
+                "mean_simple_regret": float(metrics["mean_simple_regret"]),
+                "ci_simple_regret": float(metrics["ci_simple_regret"]),
+                "mean_aurc": float(metrics["mean_aurc"]),
+                "ci_aurc": float(metrics["ci_aurc"]),
+                "mean_time_to_epsilon": float(metrics["mean_time_to_epsilon"]),
+                "ci_time_to_epsilon": float(metrics["ci_time_to_epsilon"]),
             }
     return summary, value_meta
 

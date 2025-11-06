@@ -1,6 +1,21 @@
-examples/*
-tests/*
-results/*
-__pycache__/*
-*/__pycache__/*
-.vscode/*
+/examples/
+/tests/
+/results/
+/experiments/
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*.so
+.Python
+.python-version
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Editors/OS
+.vscode/
+.idea/
+.DS_Store

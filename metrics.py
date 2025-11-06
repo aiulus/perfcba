@@ -1,8 +1,8 @@
 from __future__ import annotations
 from typing import Optional
 import numpy as np
-from Algorithm import History
-from Bandit import AbstractBandit
+from .Algorithm import History
+from .Bandit import AbstractBandit
 
 def cumulative_pseudo_regret(history: History, bandit: AbstractBandit) -> np.ndarray:
     """R_t = sum_{s<=t} (mu* - mu_{a_s})."""

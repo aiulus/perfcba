@@ -53,11 +53,14 @@ def _ordered_labels(values: Mapping[str, Any]) -> List[str]:
     return [label for label, _ in items]
 
 
-def plot_sweep_curves(
+def _plot_sweep_metric(
     *,
     summary: Mapping[str, Mapping[str, Mapping[str, float]]],
     meta: Mapping[str, Any],
+    metric_key: str,
+    ci_key: str,
     xlabel: str,
+    ylabel: str,
     title: str,
     path: str,
 ) -> None:
@@ -70,18 +73,79 @@ def plot_sweep_curves(
     xs = np.asarray([values[label] for label in labels], dtype=float)
 
     plt.figure(figsize=(7, 4))
+    plotted = False
     for name, records in summary.items():
-        means = [records[label]["mean_regret"] for label in labels]
-        cis = [records[label]["ci_regret"] for label in labels]
-        plt.plot(xs, means, label=name)
-        plt.fill_between(xs, np.array(means) - np.array(cis), np.array(means) + np.array(cis), alpha=0.18)
+        series = []
+        cis = []
+        missing = False
+        for label in labels:
+            metrics = records.get(label)
+            if metrics is None or metric_key not in metrics or ci_key not in metrics:
+                missing = True
+                break
+            series.append(metrics[metric_key])
+            cis.append(metrics[ci_key])
+        if missing:
+            continue
+        series_arr = np.asarray(series, dtype=float)
+        if np.all(np.isnan(series_arr)):
+            continue
+        cis_arr = np.asarray(cis, dtype=float)
+        plt.plot(xs, series_arr, label=name)
+        plt.fill_between(xs, series_arr - cis_arr, series_arr + cis_arr, alpha=0.18)
+        plotted = True
+    if not plotted:
+        plt.close()
+        return
     plt.xlabel(xlabel)
-    plt.ylabel("mean total regret")
+    plt.ylabel(ylabel)
     plt.title(title)
     plt.legend()
     plt.tight_layout()
     plt.savefig(path)
     plt.close()
+
+
+def plot_sweep_curves(
+    *,
+    summary: Mapping[str, Mapping[str, Mapping[str, float]]],
+    meta: Mapping[str, Any],
+    xlabel: str,
+    title: str,
+    path: str,
+) -> None:
+    _plot_sweep_metric(
+        summary=summary,
+        meta=meta,
+        metric_key="mean_regret",
+        ci_key="ci_regret",
+        xlabel=xlabel,
+        ylabel="mean total regret",
+        title=title,
+        path=path,
+    )
+    base, ext = os.path.splitext(path)
+    ext = ext if ext else ".png"
+    _plot_sweep_metric(
+        summary=summary,
+        meta=meta,
+        metric_key="mean_simple_regret",
+        ci_key="ci_simple_regret",
+        xlabel=xlabel,
+        ylabel="mean simple regret",
+        title=f"{title} (simple regret)",
+        path=f"{base}_simple_regret{ext}",
+    )
+    _plot_sweep_metric(
+        summary=summary,
+        meta=meta,
+        metric_key="mean_time_to_epsilon",
+        ci_key="ci_time_to_epsilon",
+        xlabel=xlabel,
+        ylabel="mean time to epsilon",
+        title=f"{title} (time to epsilon)",
+        path=f"{base}_time_to_epsilon{ext}",
+    )
 
 
 def _json_safe(value: Any) -> Any:
