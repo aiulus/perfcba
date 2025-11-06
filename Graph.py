@@ -211,7 +211,7 @@ def _unshielded_triples(nodes: Sequence[str], skeleton: Set[UEdge]) -> Set[Tuple
 # CPDAG from a DAG via exact enumeration (safe, small graphs)
 # ---------------------------------------------------------------------------
 
-def cpdag_from_dag(edges: Set[Edge]) -> CPDAG:
+def cpdag_from_dag(edges: Set[Edge], *, nodes: Optional[Iterable[str]] = None) -> CPDAG:
     """Compute the CPDAG (essential graph) of a DAG given by ``edges``.
 
     Implementation strategy: enumerate all DAGs in the Markov equivalence class
@@ -220,10 +220,10 @@ def cpdag_from_dag(edges: Set[Edge]) -> CPDAG:
     graphs typically used in the experiments.
     """
     # Nodes
-    nodes: Set[str] = set()
+    node_set: Set[str] = set(nodes or ())
     for u, v in edges:
-        nodes.add(u); nodes.add(v)
-    nodes_t = tuple(sorted(nodes))
+        node_set.add(u); node_set.add(v)
+    nodes_t = tuple(sorted(node_set))
 
     # Skeleton and collider constraints from the input DAG
     skeleton = _skeleton_from_edges(edges)
@@ -341,7 +341,7 @@ def cpdag_from_dag(edges: Set[Edge]) -> CPDAG:
 
 def cpdag_from_scm(scm: SCM) -> CPDAG:
     """CPDAG for the SCM's induced DAG (fully observed/causally sufficient)."""
-    return cpdag_from_dag(edges_from_scm(scm))
+    return cpdag_from_dag(edges_from_scm(scm), nodes=scm.nodes)
 
 
 def dag_from_scm(scm: SCM):  # pragma: no cover - thin wrapper for visualization
