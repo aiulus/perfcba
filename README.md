@@ -1,4 +1,36 @@
 
+## Causal bandit utilities
+
+The repository now includes helpers for constructing discrete causal bandit
+environments matching the setup in “Graph Learning is Suboptimal in Causal
+Bandits”:
+
+- `experiments.causal_envs` samples random acyclic SCMs, enumerates intervention
+  spaces, and exposes lightweight dataclasses describing the reward node and its
+  parent set.
+- `experiments.causal_setup` wraps the SCMs into the new
+  `Bandit.CausalInterventionalBandit` class and plugs them into the generic
+  `Experiment` harness, so any existing policy can be evaluated in this causal
+  setting with only a few lines of code.
+
+## Tau-scheduled study CLI
+
+Run the full budget-allocation study via:
+
+```bash
+python -m perfcba.experiments.run_tau_study \
+  --vary graph_density \
+  --n 50 --ell 2 --k 2 --m 2 --T 10000 \
+  --seeds 0:19 \
+  --scheduler interleaved \
+  --output-dir results/tau_study/graph_density
+```
+
+The CLI sweeps `tau`, generates SCMs via `CausalBanditConfig`, interleaves
+structure learning (`experiments.structure.RAPSLearner`) with exploitation
+(`experiments.exploit.ParentAwareUCB`), records JSONL summaries, and emits
+heatmaps under the specified output directory.
+
 ## Experiment 5: Parameter Sweep Runner
 
 `exp5_sweeps.py` provides a configurable CLI for running one-dimensional parameter sweeps across the unstructured, linear, and causal bandit suites described in the accompanying report. Each sweep executes the registered policies with a shared random seed list and stores both JSON summaries and PDF plots under `results/exp5_sweeps/<family>/` by default.

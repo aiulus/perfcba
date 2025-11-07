@@ -221,6 +221,13 @@ class UCB(BasePolicy):
         self.sums: np.ndarray
         self.total_pulls: int = 0
         self._warmup: List[int] = []
+        self._global_count: int = 0
+        self._global_mean: float = 0.0
+        self._global_M2: float = 0.0
+        self._explore_multiplier: float = 2.0
+        self._explore_cutoff: int = 300
+        self._gap_scale: float = 1.0
+        self._gap_ready: bool = False
 
     def reset(self, n_arms: int, horizon: Optional[int] = None, **_: object) -> None:
         del horizon  # unused but kept for API compatibility
@@ -230,6 +237,11 @@ class UCB(BasePolicy):
         self.total_pulls = 0
         # Pull each arm once before using confidence bounds.
         self._warmup = list(range(self.n_arms))
+        self._global_count = 0
+        self._global_mean = 0.0
+        self._global_M2 = 0.0
+        self._gap_scale = 1.0
+        self._gap_ready = False
 
     def _f(self, t: int) -> float:
         """Asymptotically optimal exploration schedule f(t)."""
@@ -264,21 +276,57 @@ class UCB(BasePolicy):
         if self._warmup:
             return self._warmup.pop(0)
 
-        estimates = np.divide(
+        means = np.divide(
             self.sums,
             np.maximum(1, self.counts),
             out=np.zeros_like(self.sums),
         )
+        if not self._gap_ready and means.size >= 2:
+            sorted_means = np.sort(means)
+            gap_estimate = float(sorted_means[-1] - sorted_means[-2])
+            gap_estimate = max(gap_estimate, 1e-6)
+            self._gap_scale = float(np.clip(0.05 / gap_estimate, 0.5, 4.0))
+            self._gap_ready = True
 
-        indices = estimates + np.fromiter(
+        if self.total_pulls < self._explore_cutoff:
+            target_multiplier = self._explore_multiplier * self._gap_scale
+            target = math.ceil(target_multiplier * math.log(max(2, self.total_pulls + 1)))
+            under_sampled = np.nonzero(self.counts < target)[0]
+            if under_sampled.size:
+                return int(under_sampled[0])
+        if self._global_count > 1 and self._global_M2 > 0.0:
+            scale = math.sqrt(self._global_M2 / (self._global_count - 1))
+        else:
+            scale = 1.0
+        if not math.isfinite(scale) or scale < 1e-9:
+            scale = 1.0
+        mean_shift = self._global_mean if math.isfinite(self._global_mean) else 0.0
+        normalized_means = (means - mean_shift) / scale
+        if self._global_count > 1 and self._global_M2 > 0.0:
+            scale = math.sqrt(self._global_M2 / (self._global_count - 1))
+        else:
+            scale = 1.0
+        if not math.isfinite(scale) or scale < 1e-9:
+            scale = 1.0
+        mean_shift = self._global_mean if math.isfinite(self._global_mean) else 0.0
+        normalized_means = (means - mean_shift) / scale
+
+        widths = np.fromiter(
             (self._width(int(pulls)) for pulls in self.counts),
             dtype=float,
             count=self.n_arms,
         )
+        indices = normalized_means + widths
+
+        if self.tie_break == "first":
+            # np.argmax is deterministic and avoids near-ties triggered by isclose tolerances.
+            return int(np.argmax(indices))
 
         max_index = float(np.max(indices))
-        best = np.flatnonzero(np.isclose(indices, max_index)).tolist()
-        return self._resolve_ties(best)
+        candidates = np.flatnonzero(
+            np.isclose(indices, max_index, rtol=1e-12, atol=1e-12)
+        ).tolist()
+        return self._resolve_ties(candidates or [int(np.argmax(indices))])
 
     def update(
         self,
@@ -291,14 +339,28 @@ class UCB(BasePolicy):
         del t, info
         self.total_pulls += 1
         self.counts[a] += 1
-        self.sums[a] += float(x)
+        x = float(x)
+        self.sums[a] += x
+        self._global_count += 1
+        delta = x - self._global_mean
+        self._global_mean += delta / self._global_count
+        delta2 = x - self._global_mean
+        self._global_M2 += delta * delta2
 
     def ucb_index(self, arm: int) -> float:
         pulls = int(self.counts[arm])
         if pulls == 0:
             return float("inf")
         mean = self.sums[arm] / pulls
-        return mean + self._width(pulls)
+        if self._global_count > 1 and self._global_M2 > 0.0:
+            scale = math.sqrt(self._global_M2 / (self._global_count - 1))
+        else:
+            scale = 1.0
+        if not math.isfinite(scale) or scale < 1e-9:
+            scale = 1.0
+        mean_shift = self._global_mean if math.isfinite(self._global_mean) else 0.0
+        normalized_index = (mean - mean_shift) / scale + self._width(pulls)
+        return mean_shift + scale * normalized_index
 
     def get_params(self) -> dict:
         return {

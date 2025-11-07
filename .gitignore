@@ -1,7 +1,6 @@
 /examples/
 /tests/
 /results/
-/experiments/
 
 # Python artifacts
 __pycache__/

@@ -20,8 +20,9 @@ class Profiler:
             self._means_fn = lambda t: np.array([bandit.mean(a) for a in range(bandit.n_arms)], dtype=float)
         self._stationary = getattr(bandit, "is_stationary", True)
         self._initial_means = np.asarray(self._means_fn(1), dtype=float)
-        self._means = self._initial_means
-        self._mu_star = float(np.max(self._initial_means))
+        final_index = history.T if history.T > 0 else 1
+        self._means = np.asarray(self._means_fn(final_index), dtype=float)
+        self._mu_star = float(np.max(self._means))
 
     # --- Standard cumulative pseudo-regret curve ---
     def regret_curve(self) -> np.ndarray:

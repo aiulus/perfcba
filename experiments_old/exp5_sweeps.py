@@ -208,10 +208,11 @@ def _drift_direction(k: int) -> np.ndarray:
     if k <= 1:
         return np.zeros(k, dtype=float)
     direction = np.linspace(-1.0, 1.0, k)
-    norm = np.linalg.norm(direction, ord=np.inf)
+    transformed = np.sign(direction) * np.power(np.abs(direction), 0.1)
+    norm = np.linalg.norm(transformed, ord=np.inf)
     if norm <= 0:
-        return direction
-    return direction / norm
+        return transformed
+    return transformed / norm
 
 
 def _unstructured_policy_builders(

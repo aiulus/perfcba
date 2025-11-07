@@ -3,6 +3,12 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Sequence, Callable, Optional, Dict, Any,  Iterable, List, Tuple
 from .SCM import SCM, LinearGaussianSCM, Intervention
+from .experiments.causal_envs import (
+    CausalBanditInstance,
+    InterventionArm,
+    InterventionSpace,
+    arm_to_intervention,
+)
 
 import numpy as np
 
@@ -148,12 +154,44 @@ class GaussianBandit(AbstractBandit):
         if self._sigma <= 0:
             raise ValueError("sigma must be > 0")
         self.n_arms = int(self._mu.size)
+        self._arm_generators: List[np.random.Generator] = []
+
+    def _arm_seed_sequence(self, rng: np.random.Generator) -> np.random.SeedSequence:
+        state = rng.bit_generator.state
+        seed_value: int
+        if isinstance(state, dict):
+            inner_state = state.get("state")
+            if isinstance(inner_state, dict) and "state" in inner_state:
+                seed_value = int(inner_state["state"])
+            else:
+                seed_value = int(inner_state)
+        else:
+            seed_value = int(state)
+        return np.random.SeedSequence(seed_value)
 
     def reset(self, rng: np.random.Generator) -> None:
-        pass  # stationary
+        seed_sequence = self._arm_seed_sequence(rng)
+        counts: Dict[float, int] = {}
+        keys: List[Tuple[Tuple[float, int], int]] = []
+        for idx, mean in enumerate(self._mu.tolist()):
+            occurrence = counts.get(mean, 0)
+            counts[mean] = occurrence + 1
+            keys.append(((mean, occurrence), idx))
+        keys.sort(key=lambda item: item[0])
+        child_sequences = seed_sequence.spawn(self.n_arms)
+        generators: List[np.random.Generator] = [None] * self.n_arms  # type: ignore[list-item]
+        for child_seq, (_, original_idx) in zip(child_sequences, keys):
+            generators[original_idx] = np.random.default_rng(child_seq)
+        self._arm_generators = generators
 
     def sample(self, a: int, rng: np.random.Generator) -> float:
-        return float(rng.normal(loc=self._mu[a], scale=self._sigma))
+        if not (0 <= a < self.n_arms):
+            raise IndexError("arm out of range")
+        if not self._arm_generators:
+            # Fallback to provided rng if reset has not been called.
+            return float(rng.normal(loc=self._mu[a], scale=self._sigma))
+        noise = self._arm_generators[a].standard_normal()
+        return float(self._mu[a] + self._sigma * noise)
 
     def mean(self, a: int) -> float:
         return float(self._mu[a])
@@ -187,6 +225,110 @@ class TwoArmComplementBernoulli(AbstractBandit):
 
     def info(self):
         return {"type": "TwoArmComplementBernoulli", "theta": self.theta}
+
+
+class CausalInterventionalBandit(AbstractBandit):
+    """
+    Bandit whose arms correspond to interventions in a causal SCM.
+
+    The class receives a fully specified :class:`CausalBanditInstance` and a
+    collection of intervention arms (typically generated via
+    :class:`InterventionSpace`). Each pull applies the corresponding hard
+    intervention to the SCM and returns the sampled reward along with the
+    observed values of non-intervened covariates.
+    """
+
+    def __init__(
+        self,
+        instance: CausalBanditInstance,
+        interventions: Sequence[InterventionArm],
+        *,
+        mean_mc_samples: int = 2048,
+    ) -> None:
+        if not interventions:
+            raise ValueError("At least one intervention arm is required.")
+        self.instance = instance
+        self._covariate_names = tuple(instance.node_names[:-1])
+        if len(self._covariate_names) != instance.config.n:
+            raise ValueError("Mismatch between config.n and covariate names.")
+        self._arms: Tuple[InterventionArm, ...] = tuple(interventions)
+        self._interventions: Tuple[Intervention, ...] = tuple(
+            arm_to_intervention(arm, self._covariate_names, name=f"arm_{idx}")
+            for idx, arm in enumerate(self._arms)
+        )
+        self.n_arms = len(self._arms)
+        self._mean_cache: Dict[int, float] = {}
+        self._mean_mc_samples = max(1, int(mean_mc_samples))
+
+    @classmethod
+    def from_space(
+        cls,
+        instance: CausalBanditInstance,
+        *,
+        space: Optional[InterventionSpace] = None,
+        subset_size: Optional[int] = None,
+        rng: Optional[np.random.Generator] = None,
+        mean_mc_samples: int = 2048,
+    ) -> "CausalInterventionalBandit":
+        rng = rng or instance.config.rng()
+        space = space or InterventionSpace(instance.config.n, instance.config.ell, instance.config.m)
+        if subset_size is None:
+            interventions = list(space.arms())
+        else:
+            interventions = space.random_subset(subset_size, rng, replace=False)
+        return cls(instance, interventions, mean_mc_samples=mean_mc_samples)
+
+    def reset(self, rng: np.random.Generator) -> None:
+        del rng  # nothing to reset, SCM is stateless between pulls
+
+    def _non_intervened_values(self, sample: Dict[str, Any], arm: InterventionArm) -> Dict[str, Any]:
+        intervened = set(arm.variables)
+        result: Dict[str, Any] = {}
+        for idx, name in enumerate(self._covariate_names):
+            if idx in intervened:
+                continue
+            result[name] = sample[name]
+        return result
+
+    def sample(self, a: int, rng: np.random.Generator) -> Tuple[float, Dict[str, Any]]:
+        if not (0 <= a < self.n_arms):
+            raise IndexError("arm out of range")
+        intervention = self._interventions[a]
+        sample = self.instance.scm.sample(rng, intervention=intervention)
+        reward = float(sample[self.instance.reward_node])
+        info = {
+            "assignment": sample,
+            "intervention": intervention,
+            "non_intervened": self._non_intervened_values(sample, self._arms[a]),
+        }
+        return reward, info
+
+    def mean(self, a: int) -> float:
+        if not (0 <= a < self.n_arms):
+            raise IndexError("arm out of range")
+        if a not in self._mean_cache:
+            self._mean_cache[a] = float(
+                self.instance.scm.mean(
+                    self.instance.reward_node,
+                    intervention=self._interventions[a],
+                    n_mc=self._mean_mc_samples,
+                )
+            )
+        return self._mean_cache[a]
+
+    def info(self) -> Dict[str, Any]:
+        data = super().info()
+        data.update(
+            {
+                "type": "CausalInterventionalBandit",
+                "n_covariates": self.instance.config.n,
+                "ell": self.instance.config.ell,
+                "k": self.instance.config.k,
+                "m": self.instance.config.m,
+                "n_arms": self.n_arms,
+            }
+        )
+        return data
 
 
 class SCMBandit(AbstractBandit):
@@ -273,7 +415,10 @@ class StudentTBandit(GaussianBandit):
     def sample(self, a: int, rng: np.random.Generator) -> float:
         if not (0 <= a < self.n_arms):
             raise IndexError("arm out of range")
-        noise = rng.standard_t(self.nu) * self._sigma
+        if self._arm_generators:
+            noise = self._arm_generators[a].standard_t(self.nu) * self._sigma
+        else:
+            noise = rng.standard_t(self.nu) * self._sigma
         return float(self._mu[a] + noise)
 
     def info(self) -> Dict[str, Any]:
@@ -311,7 +456,7 @@ class DriftingGaussianBandit(GaussianBandit):
         self._horizon = int(horizon)
 
     def reset(self, rng: np.random.Generator) -> None:
-        del rng
+        super().reset(rng)
         self._t = 0
 
     def means_at(self, t: int) -> np.ndarray:
@@ -328,7 +473,11 @@ class DriftingGaussianBandit(GaussianBandit):
             raise IndexError("arm out of range")
         t = self._t + 1
         means = self.means_at(t)
-        reward = rng.normal(loc=means[a], scale=self._sigma)
+        if self._arm_generators:
+            noise = self._arm_generators[a].standard_normal()
+        else:
+            noise = rng.standard_normal()
+        reward = means[a] + self._sigma * noise
         self._t = t
         return float(reward)
 

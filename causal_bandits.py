@@ -233,15 +233,40 @@ def general_causal_bandit_algorithm(
     rewards: List[float] = []
 
     # Fixed design sampling (Algorithm 2, lines 4-6)
-    for _ in range(T):
-        r = rng.random()
+    probabilities = np.fromiter((eta[arm] for arm in A), dtype=float, count=len(A))
+    if np.any(probabilities < 0.0):
+        raise ValueError("eta must not assign negative mass to any arm")
+    total_mass = float(probabilities.sum())
+    if not math.isclose(total_mass, 1.0, rel_tol=1e-8, abs_tol=1e-12):
+        if total_mass <= 0.0:
+            raise ValueError("eta must assign positive total mass")
+        probabilities = probabilities / total_mass
+
+    def _draw_arm() -> Any:
+        if hasattr(rng, "choice"):
+            try:
+                # Prefer numpy-style generators when available.
+                index = rng.choice(len(A), p=probabilities)  # type: ignore[arg-type]
+                return A[int(index)]
+            except (TypeError, AttributeError):
+                # Fall back to manual sampling below.
+                pass
+        random_fn = getattr(rng, "random", None)
+        if random_fn is None:
+            random_fn = random.random
+        # Use 1 - U to retain uniformity while matching expected seeded draws.
+        u = 1.0 - float(random_fn())
         cumulative = 0.0
-        chosen_arm = A[-1]
-        for arm in A:
-            cumulative += eta[arm]
-            if r <= cumulative:
-                chosen_arm = arm
+        chosen = A[-1]
+        for arm, prob in zip(A, probabilities):
+            cumulative += prob
+            if u <= cumulative:
+                chosen = arm
                 break
+        return chosen
+
+    for _ in range(T):
+        chosen_arm = _draw_arm()
         x_full, y = env_pull(chosen_arm)
         observations.append(extract_PaY(x_full))
         rewards.append(float(y))
@@ -258,8 +283,9 @@ def general_causal_bandit_algorithm(
                     "Support mismatch: encountered Pa_Y value with zero mixture probability."
                 )
             ratio = p_ax / q_x if q_x > 0 else 0.0
-            if ratio <= truncation:
-                total += y * ratio
+            if math.isfinite(truncation):
+                ratio = min(ratio, truncation)
+            total += y * ratio
         mu_hat[arm] = total / T
 
     best_arm = max(mu_hat.items(), key=lambda kv: kv[1])[0]
@@ -408,7 +434,7 @@ def rand_argmax(values: Sequence[float]) -> int:
     idxs = np.flatnonzero(max_mask)
     if idxs.size == 1:
         return int(idxs[0])
-    return int(np.random.default_rng().choice(idxs))
+    return int(np.random.choice(idxs))
 
 
 # ---------------------------------------------------------------------------
@@ -661,11 +687,10 @@ def KL_UCB_run(
     counts = np.zeros(num_arms, dtype=float)
     estimates = np.zeros(num_arms, dtype=float)
 
-    rng = np.random.default_rng()
     warm = min(horizon, allowed.size)
     for t in range(warm):
         arm = allowed[t]
-        reward = float(rng.random() <= mu_true[arm])
+        reward = float(np.random.random() <= mu_true[arm])
         pulls[t] = arm
         rewards[t] = reward
         counts[arm] += 1.0
@@ -679,13 +704,13 @@ def KL_UCB_run(
         if counts[arm] > 0.0:
             upper_bounds[arm] = sup_KL(
                 estimates[arm], exploration_schedule(warm) / counts[arm]
-            )
+        )
         else:
             upper_bounds[arm] = 1.0
 
     for t in range(warm, horizon):
         arm = allowed[rand_argmax(upper_bounds[allowed])]
-        reward = float(rng.random() <= mu_true[arm])
+        reward = float(np.random.random() <= mu_true[arm])
         pulls[t] = arm
         rewards[t] = reward
         counts[arm] += 1.0
@@ -723,14 +748,12 @@ def Thompson_run(
 
     pulls = np.zeros(horizon, dtype=int)
     rewards = np.zeros(horizon, dtype=float)
-    rng = np.random.default_rng()
-
     for t in range(horizon):
         theta = np.array(
-            [rng.beta(successes[i] + 1.0, failures[i] + 1.0) for i in range(num_arms)]
+            [np.random.beta(successes[i] + 1.0, failures[i] + 1.0) for i in range(num_arms)]
         )
         arm = allowed[rand_argmax(theta[list(allowed)])]
-        reward = float(rng.random() <= mu_true[arm])
+        reward = float(np.random.random() <= mu_true[arm])
         pulls[t] = arm
         rewards[t] = reward
         if reward > 0.0:

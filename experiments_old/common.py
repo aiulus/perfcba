@@ -41,20 +41,39 @@ def mean_confidence_interval(values: Sequence[float], confidence: float = 0.95) 
     return mean, float(z * se)
 
 
-def _arm_estimates(history: History, bandit: AbstractBandit) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Return (counts, empirical_means, errors) for each arm, using NaN for never-pulled arms."""
+def _arm_estimates(history: History, bandit: AbstractBandit) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Return (counts, empirical_means, errors, true_means) for each arm."""
 
     n_arms = bandit.n_arms
     counts = history.pulls.astype(float)
     sums = np.zeros(n_arms, dtype=float)
-    for a, r in zip(history.actions, history.rewards):
+    true_sums = np.zeros(n_arms, dtype=float)
+    horizon = int(history.T)
+    if horizon > 0:
+        means_path = np.stack(
+            [np.asarray(bandit.means_at(t), dtype=float) for t in range(1, horizon + 1)],
+            axis=0,
+        )
+        time_avg_means = np.mean(means_path, axis=0)
+    else:
+        time_avg_means = np.asarray(bandit.means_at(1), dtype=float)
+
+    for idx, (a, r) in enumerate(zip(history.actions, history.rewards), start=1):
         sums[a] += float(r)
+        means_t = np.asarray(bandit.means_at(idx), dtype=float)
+        if means_t.shape[0] != n_arms:
+            raise ValueError("means_at must return an array with one entry per arm")
+        true_sums[a] += float(means_t[a])
     empirical = np.full(n_arms, np.nan, dtype=float)
     positive = counts > 0
     empirical[positive] = sums[positive] / counts[positive]
-    true_means = np.asarray(bandit.means_at(1), dtype=float)
+    true_means = np.full(n_arms, np.nan, dtype=float)
+    if np.any(positive):
+        true_means[positive] = true_sums[positive] / counts[positive]
+    if np.any(~positive):
+        true_means[~positive] = time_avg_means[~positive]
     errors = empirical - true_means
-    return counts, empirical, errors
+    return counts, empirical, errors, true_means
 
 
 def run_policy_trials(
@@ -105,7 +124,7 @@ def run_policy_trials(
         aurc_vals = np.zeros(n_runs, dtype=float)
         time_to_eps_vals = np.full(n_runs, np.nan, dtype=float)
         simple_regrets = np.zeros(n_runs, dtype=float)
-        true_means: Optional[np.ndarray] = None
+        true_means_runs: List[np.ndarray] = []
 
         for idx, seed in enumerate(seeds):
             random.seed(seed)
@@ -125,15 +144,15 @@ def run_policy_trials(
             regret_curves[idx, :] = curve
             total_regrets.append(float(curve[-1]) if curve.size else 0.0)
 
-            counts, _, errors = _arm_estimates(run, bandit)
+            counts, _, errors, arm_true_means = _arm_estimates(run, bandit)
             if pulls is None:
                 pulls = np.zeros((n_runs, bandit.n_arms), dtype=float)
                 abs_errors = np.zeros((n_runs, bandit.n_arms), dtype=float)
-                true_means = np.asarray(bandit.means_at(1), dtype=float)
             pulls[idx, :] = counts
             abs_errors[idx, :] = np.abs(errors)
+            true_means_runs.append(arm_true_means)
 
-        if regret_curves is None or pulls is None or abs_errors is None or true_means is None:
+        if regret_curves is None or pulls is None or abs_errors is None:
             raise RuntimeError("No runs executed. Check seeds/horizons inputs.")
 
         mean_curve = regret_curves.mean(axis=0)
@@ -157,6 +176,11 @@ def run_policy_trials(
         mean_regret, ci_regret = mean_confidence_interval(total_regrets)
         mean_simple_regret, ci_simple_regret = mean_confidence_interval(simple_regrets.tolist())
         mean_aurc, ci_aurc = mean_confidence_interval(aurc_vals.tolist())
+        if true_means_runs:
+            stacked = np.stack(true_means_runs, axis=0)
+            avg_true_means = np.nanmean(stacked, axis=0)
+        else:
+            avg_true_means = np.array([], dtype=float)
         mask_time = ~np.isnan(time_to_eps_vals)
         if np.count_nonzero(mask_time):
             mean_time_to_eps, ci_time_to_eps = mean_confidence_interval(time_to_eps_vals[mask_time].tolist())
@@ -172,7 +196,7 @@ def run_policy_trials(
             "ci_pulls": ci_pulls,
             "mean_abs_error": mean_abs_err,
             "ci_abs_error": ci_abs_err,
-            "true_means": true_means,
+            "true_means": avg_true_means,
             "mean_simple_regret": mean_simple_regret,
             "ci_simple_regret": ci_simple_regret,
             "mean_aurc": mean_aurc,
