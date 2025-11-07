@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Dict, List, Sequence, Tuple
 
 import numpy as np
+from tqdm.auto import tqdm
 
 from .causal_envs import CausalBanditConfig, InterventionSpace, build_random_scm
 from .exploit import ArmBuilder, ParentAwareUCB
@@ -184,61 +185,68 @@ def main() -> None:
     )
     knob_values = grid_values(args.vary, n=args.n, k=args.k)
     results: List[Dict[str, float]] = []
+    total_trials = len(knob_values) * len(args.tau_grid) * len(seeds)
+    progress = tqdm(total=total_trials, desc="Tau study", unit="trial")
 
-    for knob_value in knob_values:
-        cfg = base_cfg
-        if args.vary == "graph_density":
-            cfg = CausalBanditConfig(
-                n=cfg.n,
-                ell=cfg.ell,
-                k=cfg.k,
-                m=cfg.m,
-                edge_prob=float(knob_value),
-            )
-        elif args.vary == "parent_count":
-            cfg = CausalBanditConfig(
-                n=cfg.n,
-                ell=cfg.ell,
-                k=int(knob_value),
-                m=max(int(knob_value), cfg.m),
-                edge_prob=cfg.edge_prob,
-            )
-        elif args.vary == "intervention_size":
-            cfg = CausalBanditConfig(
-                n=cfg.n,
-                ell=cfg.ell,
-                k=cfg.k,
-                m=int(knob_value),
-                edge_prob=cfg.edge_prob,
-            )
-        elif args.vary == "alphabet":
-            cfg = CausalBanditConfig(
-                n=cfg.n,
-                ell=int(knob_value),
-                k=cfg.k,
-                m=cfg.m,
-                edge_prob=cfg.edge_prob,
-            )
-        elif args.vary == "horizon":
-            pass  # handled via args.T when running trials
-
-        current_horizon = args.T if args.vary != "horizon" else int(knob_value)
-        subset_size = subset_size_for_known_k(cfg, current_horizon)
-        for tau in args.tau_grid:
-            for seed in seeds:
-                record = run_trial(
-                    base_cfg=cfg,
-                    horizon=current_horizon,
-                    tau=tau,
-                    seed=seed,
-                    knob_value=float(knob_value),
-                    subset_size=subset_size,
-                    scheduler_mode=args.scheduler,
-                    use_full_budget=args.etc_use_full_budget,
-                    effect_threshold=args.effect_threshold,
-                    min_samples=args.min_samples,
+    try:
+        for knob_value in knob_values:
+            cfg = base_cfg
+            if args.vary == "graph_density":
+                cfg = CausalBanditConfig(
+                    n=cfg.n,
+                    ell=cfg.ell,
+                    k=cfg.k,
+                    m=cfg.m,
+                    edge_prob=float(knob_value),
                 )
-                results.append(record)
+            elif args.vary == "parent_count":
+                cfg = CausalBanditConfig(
+                    n=cfg.n,
+                    ell=cfg.ell,
+                    k=int(knob_value),
+                    m=max(int(knob_value), cfg.m),
+                    edge_prob=cfg.edge_prob,
+                )
+            elif args.vary == "intervention_size":
+                cfg = CausalBanditConfig(
+                    n=cfg.n,
+                    ell=cfg.ell,
+                    k=cfg.k,
+                    m=int(knob_value),
+                    edge_prob=cfg.edge_prob,
+                )
+            elif args.vary == "alphabet":
+                cfg = CausalBanditConfig(
+                    n=cfg.n,
+                    ell=int(knob_value),
+                    k=cfg.k,
+                    m=cfg.m,
+                    edge_prob=cfg.edge_prob,
+                )
+            elif args.vary == "horizon":
+                pass  # handled via args.T when running trials
+
+            current_horizon = args.T if args.vary != "horizon" else int(knob_value)
+            subset_size = subset_size_for_known_k(cfg, current_horizon)
+            for tau in args.tau_grid:
+                for seed in seeds:
+                    record = run_trial(
+                        base_cfg=cfg,
+                        horizon=current_horizon,
+                        tau=tau,
+                        seed=seed,
+                        knob_value=float(knob_value),
+                        subset_size=subset_size,
+                        scheduler_mode=args.scheduler,
+                        use_full_budget=args.etc_use_full_budget,
+                        effect_threshold=args.effect_threshold,
+                        min_samples=args.min_samples,
+                    )
+                    results.append(record)
+                    progress.set_postfix(knob=knob_value, tau=tau, seed=seed)
+                    progress.update(1)
+    finally:
+        progress.close()
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     with (args.output_dir / "results.jsonl").open("w", encoding="utf-8") as f:
