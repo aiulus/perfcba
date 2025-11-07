@@ -16,7 +16,7 @@ from .exploit import ArmBuilder, ParentAwareUCB
 from .grids import TAU_GRID, grid_values
 from .heatmap import plot_heatmap
 from .metrics import summarize
-from .scheduler import TauScheduler
+from .scheduler import build_scheduler
 from .structure import RAPSLearner, StructureConfig
 
 
@@ -74,6 +74,7 @@ def run_trial(
     knob_value: float,
     subset_size: int,
     scheduler_mode: str,
+    use_full_budget: bool,
     effect_threshold: float,
     min_samples: int,
 ) -> Dict[str, float]:
@@ -97,15 +98,15 @@ def run_trial(
         subset_size=subset_size,
         mc_samples=1024,
     )
-    scheduler = TauScheduler(
+    scheduler = build_scheduler(
+        mode=scheduler_mode,  # type: ignore[arg-type]
         instance=instance,
         structure=structure,
         arm_builder=arm_builder,
         policy=policy,
         tau=tau,
         horizon=horizon,
-        mode=scheduler_mode,  # type: ignore[arg-type]
-        optimal_mean=optimal_mean,
+        use_full_budget=use_full_budget,
     )
     summary = scheduler.run(rng)
     metrics = summarize(summary.logs, optimal_mean)
@@ -155,7 +156,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--T", type=int, default=10_000)
     parser.add_argument("--tau-grid", type=float, nargs="*", default=TAU_GRID)
     parser.add_argument("--seeds", type=str, default="0:9", help="Seed range start:end.")
-    parser.add_argument("--scheduler", choices=["interleaved", "two_phase"], default="interleaved")
+    parser.add_argument("--scheduler", choices=["interleaved", "two_phase", "etc"], default="interleaved")
+    parser.add_argument(
+        "--etc-use-full-budget",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="If false, the ETC scheduler commits early once structure learning is done.",
+    )
     parser.add_argument("--output-dir", type=Path, default=Path("results/tau_study"))
     parser.add_argument("--effect-threshold", type=float, default=0.05)
     parser.add_argument("--min-samples", type=int, default=20)
@@ -227,6 +234,7 @@ def main() -> None:
                     knob_value=float(knob_value),
                     subset_size=subset_size,
                     scheduler_mode=args.scheduler,
+                    use_full_budget=args.etc_use_full_budget,
                     effect_threshold=args.effect_threshold,
                     min_samples=args.min_samples,
                 )
