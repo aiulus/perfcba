@@ -7,7 +7,7 @@ import json
 import math
 from itertools import combinations, product
 from pathlib import Path
-from typing import Dict, List, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 from tqdm.auto import tqdm
@@ -17,7 +17,7 @@ from .exploit import ArmBuilder, ParentAwareUCB
 from .grids import TAU_GRID, grid_values
 from .heatmap import plot_heatmap
 from .metrics import summarize
-from .scheduler import build_scheduler
+from .scheduler import AdaptiveBurstConfig, build_scheduler
 from .structure import RAPSLearner, StructureConfig
 
 
@@ -66,6 +66,36 @@ def compute_optimal_mean(
     return best
 
 
+def adaptive_config_from_args(
+    args: argparse.Namespace,
+    horizon: int,
+) -> Optional[AdaptiveBurstConfig]:
+    if args.scheduler != "adaptive_burst":
+        return None
+    window = args.ab_window if args.ab_window is not None else max(5, int(0.05 * max(1, horizon)))
+    stall_min = args.ab_stall_min if args.ab_stall_min is not None else window
+    cooldown = args.ab_cooldown
+    return AdaptiveBurstConfig(
+        start_mode=args.ab_start_mode,
+        initial_burst=max(1, args.ab_x0),
+        growth_factor=max(1.0, args.ab_gamma),
+        window=window,
+        stall_min_exploit=stall_min,
+        metric=args.ab_metric,
+        eta_down=args.ab_eta_down,
+        eta_up=args.ab_eta_up,
+        reset_mode=args.ab_x_reset,
+        cooldown=cooldown,
+        tail_fraction=max(0.0, args.ab_tail_frac),
+        opt_rate_tolerance=args.ab_opt_gap,
+        ewma_lambda=args.ab_ewma_lam,
+        enable_page_hinkley=args.ab_enable_ph,
+        ph_delta=args.ab_ph_delta,
+        ph_lambda=args.ab_ph_lambda,
+        ph_alpha=args.ab_ph_alpha,
+    )
+
+
 def run_trial(
     *,
     base_cfg: CausalBanditConfig,
@@ -78,6 +108,7 @@ def run_trial(
     use_full_budget: bool,
     effect_threshold: float,
     min_samples: int,
+    adaptive_config: Optional[AdaptiveBurstConfig],
 ) -> Dict[str, float]:
     rng = np.random.default_rng(seed)
     instance = build_random_scm(base_cfg, rng=rng)
@@ -108,6 +139,7 @@ def run_trial(
         tau=tau,
         horizon=horizon,
         use_full_budget=use_full_budget,
+        adaptive_config=adaptive_config,
     )
     summary = scheduler.run(rng)
     metrics = summarize(summary.logs, optimal_mean)
@@ -157,13 +189,104 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--T", type=int, default=10_000)
     parser.add_argument("--tau-grid", type=float, nargs="*", default=TAU_GRID)
     parser.add_argument("--seeds", type=str, default="0:9", help="Seed range start:end.")
-    parser.add_argument("--scheduler", choices=["interleaved", "two_phase", "etc"], default="interleaved")
+    parser.add_argument(
+        "--scheduler",
+        choices=["interleaved", "two_phase", "etc", "adaptive_burst"],
+        default="interleaved",
+    )
     parser.add_argument(
         "--etc-use-full-budget",
         action=argparse.BooleanOptionalAction,
         default=True,
         help="If false, the ETC scheduler commits early once structure learning is done.",
     )
+    parser.add_argument(
+        "--ab-start-mode",
+        choices=["exploit_first", "explore_first"],
+        default="exploit_first",
+        help="(adaptive_burst) Start in exploitation or exploration.",
+    )
+    parser.add_argument(
+        "--ab-x0",
+        type=int,
+        default=1,
+        help="(adaptive_burst) Initial exploration burst size.",
+    )
+    parser.add_argument(
+        "--ab-gamma",
+        type=float,
+        default=2.0,
+        help="(adaptive_burst) Burst growth factor.",
+    )
+    parser.add_argument(
+        "--ab-window",
+        type=int,
+        default=None,
+        help="(adaptive_burst) Exploitation window for stall detection.",
+    )
+    parser.add_argument(
+        "--ab-stall-min",
+        type=int,
+        default=None,
+        help="(adaptive_burst) Minimum exploitation rounds before stall checks.",
+    )
+    parser.add_argument(
+        "--ab-cooldown",
+        type=int,
+        default=None,
+        help="(adaptive_burst) Cooldown (in exploit rounds) after a burst.",
+    )
+    parser.add_argument(
+        "--ab-metric",
+        choices=["reward", "regret", "opt_rate"],
+        default="reward",
+        help="(adaptive_burst) Statistic used for stall detection.",
+    )
+    parser.add_argument(
+        "--ab-eta-down",
+        type=float,
+        default=-0.15,
+        help="(adaptive_burst) Trigger threshold (normalized gain).",
+    )
+    parser.add_argument(
+        "--ab-eta-up",
+        type=float,
+        default=0.1,
+        help="(adaptive_burst) Release threshold (normalized gain).",
+    )
+    parser.add_argument(
+        "--ab-x-reset",
+        choices=["one", "x0"],
+        default="one",
+        help="(adaptive_burst) Burst size after improvement resumes.",
+    )
+    parser.add_argument(
+        "--ab-tail-frac",
+        type=float,
+        default=0.25,
+        help="(adaptive_burst) Max fraction of remaining rounds spent in one burst.",
+    )
+    parser.add_argument(
+        "--ab-opt-gap",
+        type=float,
+        default=0.01,
+        help="(adaptive_burst) Tolerance for opt_rate metric.",
+    )
+    parser.add_argument(
+        "--ab-ewma-lam",
+        type=float,
+        default=0.2,
+        help="(adaptive_burst) EWMA smoothing parameter.",
+    )
+    parser.add_argument(
+        "--ab-enable-ph",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="(adaptive_burst) Enable Page–Hinkley guard.",
+    )
+    parser.add_argument("--ab-ph-delta", type=float, default=1e-3, help="(adaptive_burst) Page–Hinkley δ.")
+    parser.add_argument("--ab-ph-lambda", type=float, default=0.05, help="(adaptive_burst) Page–Hinkley λ.")
+    parser.add_argument("--ab-ph-alpha", type=float, default=0.1, help="(adaptive_burst) Page–Hinkley α.")
     parser.add_argument("--output-dir", type=Path, default=Path("results/tau_study"))
     parser.add_argument("--effect-threshold", type=float, default=0.05)
     parser.add_argument("--min-samples", type=int, default=20)
@@ -228,6 +351,7 @@ def main() -> None:
 
             current_horizon = args.T if args.vary != "horizon" else int(knob_value)
             subset_size = subset_size_for_known_k(cfg, current_horizon)
+            adaptive_cfg = adaptive_config_from_args(args, current_horizon)
             for tau in args.tau_grid:
                 for seed in seeds:
                     record = run_trial(
@@ -241,6 +365,7 @@ def main() -> None:
                         use_full_budget=args.etc_use_full_budget,
                         effect_threshold=args.effect_threshold,
                         min_samples=args.min_samples,
+                        adaptive_config=adaptive_cfg,
                     )
                     results.append(record)
                     progress.set_postfix(knob=knob_value, tau=tau, seed=seed)
