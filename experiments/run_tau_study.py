@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+from collections import defaultdict
 from itertools import combinations, product
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -17,7 +18,8 @@ from .exploit import ArmBuilder, ParentAwareUCB
 from .grids import TAU_GRID, grid_values
 from .heatmap import plot_heatmap
 from .metrics import summarize
-from .scheduler import AdaptiveBurstConfig, build_scheduler
+from .scheduler import AdaptiveBurstConfig, RunSummary, build_scheduler
+from .timeline import encode_schedule, plot_time_allocation
 from .structure import RAPSLearner, StructureConfig
 
 
@@ -66,6 +68,12 @@ def compute_optimal_mean(
     return best
 
 
+def _format_value(value: float) -> str:
+    if float(value).is_integer():
+        return str(int(value))
+    return f"{value:.4g}"
+
+
 def adaptive_config_from_args(
     args: argparse.Namespace,
     horizon: int,
@@ -109,7 +117,7 @@ def run_trial(
     effect_threshold: float,
     min_samples: int,
     adaptive_config: Optional[AdaptiveBurstConfig],
-) -> Dict[str, float]:
+) -> Tuple[Dict[str, float], RunSummary]:
     rng = np.random.default_rng(seed)
     instance = build_random_scm(base_cfg, rng=rng)
     optimal_mean = compute_optimal_mean(instance, rng)
@@ -143,7 +151,7 @@ def run_trial(
     )
     summary = scheduler.run(rng)
     metrics = summarize(summary.logs, optimal_mean)
-    return {
+    record = {
         "tau": tau,
         "knob_value": knob_value,
         "seed": seed,
@@ -153,6 +161,7 @@ def run_trial(
         "structure_steps": summary.structure_steps,
         "parents_found": len(summary.final_parent_set),
     }
+    return record, summary
 
 
 def aggregate_heatmap(
@@ -287,6 +296,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ab-ph-delta", type=float, default=1e-3, help="(adaptive_burst) Page–Hinkley δ.")
     parser.add_argument("--ab-ph-lambda", type=float, default=0.05, help="(adaptive_burst) Page–Hinkley λ.")
     parser.add_argument("--ab-ph-alpha", type=float, default=0.1, help="(adaptive_burst) Page–Hinkley α.")
+    parser.add_argument(
+        "--timeline-dir",
+        type=Path,
+        default=None,
+        help="If set, write per-run and per-sweep time allocation diagrams to this directory.",
+    )
+    parser.add_argument(
+        "--timeline-max-columns",
+        type=int,
+        default=2000,
+        help="Max columns to plot in time allocation diagrams (longer horizons are downsampled).",
+    )
     parser.add_argument("--output-dir", type=Path, default=Path("results/tau_study"))
     parser.add_argument("--effect-threshold", type=float, default=0.05)
     parser.add_argument("--min-samples", type=int, default=20)
@@ -310,6 +331,10 @@ def main() -> None:
     results: List[Dict[str, float]] = []
     total_trials = len(knob_values) * len(args.tau_grid) * len(seeds)
     progress = tqdm(total=total_trials, desc="Tau study", unit="trial")
+    timeline_dir: Optional[Path] = args.timeline_dir
+    timeline_store = defaultdict(list) if timeline_dir is not None else None
+    if timeline_dir is not None:
+        timeline_dir.mkdir(parents=True, exist_ok=True)
 
     try:
         for knob_value in knob_values:
@@ -354,7 +379,7 @@ def main() -> None:
             adaptive_cfg = adaptive_config_from_args(args, current_horizon)
             for tau in args.tau_grid:
                 for seed in seeds:
-                    record = run_trial(
+                    record, summary = run_trial(
                         base_cfg=cfg,
                         horizon=current_horizon,
                         tau=tau,
@@ -368,10 +393,43 @@ def main() -> None:
                         adaptive_config=adaptive_cfg,
                     )
                     results.append(record)
+                    if timeline_dir is not None:
+                        schedule = encode_schedule(summary.logs)
+                        key = (float(knob_value), float(tau))
+                        timeline_store[key].append((seed, schedule))
+                        per_seed_path = timeline_dir / f"timeline_knob-{_format_value(float(knob_value))}_tau-{_format_value(float(tau))}_seed-{seed}.png"
+                        plot_time_allocation(
+                            schedule,
+                            per_seed_path,
+                            title=f"knob={_format_value(float(knob_value))}, tau={_format_value(float(tau))}, seed={seed}",
+                            yticklabels=[f"seed {seed}"],
+                            max_columns=args.timeline_max_columns,
+                        )
                     progress.set_postfix(knob=knob_value, tau=tau, seed=seed)
                     progress.update(1)
     finally:
         progress.close()
+
+    if timeline_dir is not None and timeline_store:
+        for (knob_value, tau), rows in timeline_store.items():
+            rows.sort(key=lambda item: item[0])
+            max_len = max(arr.shape[0] for _, arr in rows)
+            matrix = np.zeros((len(rows), max_len), dtype=np.float32)
+            labels: List[str] = []
+            for idx, (seed, arr) in enumerate(rows):
+                fill_value = float(arr[-1]) if arr.size else 0.0
+                matrix[idx, : arr.shape[0]] = arr
+                if arr.shape[0] < max_len:
+                    matrix[idx, arr.shape[0] :] = fill_value
+                labels.append(f"seed {seed}")
+            agg_path = timeline_dir / f"timeline_knob-{_format_value(knob_value)}_tau-{_format_value(tau)}_grid.png"
+            plot_time_allocation(
+                matrix,
+                agg_path,
+                title=f"knob={_format_value(knob_value)}, tau={_format_value(tau)}",
+                yticklabels=labels,
+                max_columns=args.timeline_max_columns,
+            )
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     with (args.output_dir / "results.jsonl").open("w", encoding="utf-8") as f:
