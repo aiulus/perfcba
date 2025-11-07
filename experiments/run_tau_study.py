@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import math
 from collections import defaultdict
@@ -13,6 +14,13 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import numpy as np
 from tqdm.auto import tqdm
 
+from .artifacts import (
+    TrialArtifact,
+    build_metadata,
+    load_trial_artifact,
+    make_trial_identity,
+    write_trial_artifact,
+)
 from .causal_envs import CausalBanditConfig, InterventionSpace, build_random_scm
 from .exploit import ArmBuilder, ParentAwareUCB
 from .grids import TAU_GRID, grid_values
@@ -117,7 +125,7 @@ def run_trial(
     effect_threshold: float,
     min_samples: int,
     adaptive_config: Optional[AdaptiveBurstConfig],
-) -> Tuple[Dict[str, float], RunSummary]:
+) -> Tuple[Dict[str, float], RunSummary, float]:
     rng = np.random.default_rng(seed)
     instance = build_random_scm(base_cfg, rng=rng)
     optimal_mean = compute_optimal_mean(instance, rng)
@@ -161,7 +169,7 @@ def run_trial(
         "structure_steps": summary.structure_steps,
         "parents_found": len(summary.final_parent_set),
     }
-    return record, summary
+    return record, summary, optimal_mean
 
 
 def aggregate_heatmap(
@@ -312,6 +320,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--effect-threshold", type=float, default=0.05)
     parser.add_argument("--min-samples", type=int, default=20)
     parser.add_argument("--metric", choices=["cumulative_regret", "tto"], default="cumulative_regret")
+    parser.add_argument(
+        "--persist-trials",
+        type=Path,
+        default=None,
+        help="Optional directory for storing per-trial artifacts (disabled by default).",
+    )
+    parser.add_argument(
+        "--reuse-trials",
+        type=Path,
+        default=None,
+        help="Optional directory containing cached trial artifacts to reuse.",
+    )
     return parser.parse_args()
 
 
@@ -335,6 +355,10 @@ def main() -> None:
     timeline_store = defaultdict(list) if timeline_dir is not None else None
     if timeline_dir is not None:
         timeline_dir.mkdir(parents=True, exist_ok=True)
+
+    persist_dir: Optional[Path] = args.persist_trials
+    reuse_dir: Optional[Path] = args.reuse_trials
+    cli_args_snapshot = vars(args).copy()
 
     try:
         for knob_value in knob_values:
@@ -377,21 +401,62 @@ def main() -> None:
             current_horizon = args.T if args.vary != "horizon" else int(knob_value)
             subset_size = subset_size_for_known_k(cfg, current_horizon)
             adaptive_cfg = adaptive_config_from_args(args, current_horizon)
+            adaptive_cfg_dict = dataclasses.asdict(adaptive_cfg) if adaptive_cfg is not None else None
+
             for tau in args.tau_grid:
                 for seed in seeds:
-                    record, summary = run_trial(
-                        base_cfg=cfg,
+                    identity = make_trial_identity(
+                        cfg,
                         horizon=current_horizon,
-                        tau=tau,
+                        tau=float(tau),
                         seed=seed,
                         knob_value=float(knob_value),
+                        scheduler=args.scheduler,
                         subset_size=subset_size,
-                        scheduler_mode=args.scheduler,
                         use_full_budget=args.etc_use_full_budget,
                         effect_threshold=args.effect_threshold,
                         min_samples=args.min_samples,
-                        adaptive_config=adaptive_cfg,
+                        adaptive_config=adaptive_cfg_dict,
                     )
+
+                    artifact = load_trial_artifact(reuse_dir, identity) if reuse_dir is not None else None
+
+                    if artifact is not None:
+                        record = artifact.record
+                        summary = artifact.summary
+                        optimal_mean = artifact.optimal_mean
+                    else:
+                        record, summary, optimal_mean = run_trial(
+                            base_cfg=cfg,
+                            horizon=current_horizon,
+                            tau=tau,
+                            seed=seed,
+                            knob_value=float(knob_value),
+                            subset_size=subset_size,
+                            scheduler_mode=args.scheduler,
+                            use_full_budget=args.etc_use_full_budget,
+                            effect_threshold=args.effect_threshold,
+                            min_samples=args.min_samples,
+                            adaptive_config=adaptive_cfg,
+                        )
+                        if persist_dir is not None:
+                            metadata = build_metadata(
+                                cli_args={
+                                    **cli_args_snapshot,
+                                    "tau": float(tau),
+                                    "seed": int(seed),
+                                    "knob_value": float(knob_value),
+                                }
+                            )
+                            artifact = TrialArtifact(
+                                identity=identity,
+                                record=record,
+                                summary=summary,
+                                optimal_mean=optimal_mean,
+                                metadata=metadata,
+                            )
+                            write_trial_artifact(persist_dir, artifact)
+
                     results.append(record)
                     if timeline_dir is not None:
                         schedule = encode_schedule(summary.logs)
