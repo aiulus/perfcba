@@ -31,6 +31,40 @@ structure learning (`experiments.structure.RAPSLearner`) with exploitation
 (`experiments.exploit.ParentAwareUCB`), records JSONL summaries, and emits
 heatmaps under the specified output directory.
 
+### Post-processing and hypothesis testing
+
+Once a sweep finishes, plug the JSONL output into the analysis CLI to generate
+annotated heat maps, gradient flow overlays, and regression-based hypothesis
+tests:
+
+```bash
+python -m perfcba.experiments.analysis \
+  --results results/tau_study/graph_density/results.jsonl \
+  --vary graph_density \
+  --n 50 \
+  --metrics cumulative_regret tto \
+  --out-dir results/tau_study/graph_density/analysis
+```
+
+Key implementation details:
+
+- gradients are evaluated in the transformed density axis
+  (`g(p) = log(n * p)`) to respect the geometric spacing of the grid, but
+  plotted against the raw densities;
+- bootstrap resampling over seeds filters the quiver overlay so only
+  statistically reliable arrows remain opaque;
+- the interaction test fits `metric ~ tau + g(p) + tau * g(p)` with robust
+  covariance (clustered if `instance_id` is provided, otherwise HC3), and the
+  Markdown/JSON reports also collect the Spearman column trends and the
+  slope-versus-density meta-regression; and
+- smoothing only affects the flow visualization – statistical tests always use
+  the unsmoothed per-seed values, and you can disable smoothing via
+  `--no-smooth` for audits.
+
+Each run captures reproducibility breadcrumbs (CLI invocations, grids, bootstrap
+settings) inside `tests_<metric>.json`, which makes downstream reporting
+straightforward.
+
 ## Experiment 5: Parameter Sweep Runner
 
 `exp5_sweeps.py` provides a configurable CLI for running one-dimensional parameter sweeps across the unstructured, linear, and causal bandit suites described in the accompanying report. Each sweep executes the registered policies with a shared random seed list and stores both JSON summaries and PDF plots under `results/exp5_sweeps/<family>/` by default.
