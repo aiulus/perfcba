@@ -16,6 +16,7 @@ def plot_heatmap(
     *,
     title: str,
     cbar_label: str,
+    x_label: str,
     output_path: Path,
 ) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -30,7 +31,7 @@ def plot_heatmap(
     ax.set_xticklabels([f"{v:.2f}" for v in knob_values], rotation=45, ha="right")
     ax.set_yticks(range(len(tau_values)))
     ax.set_yticklabels([f"{tau:.2f}" for tau in tau_values])
-    ax.set_xlabel("Knob value")
+    ax.set_xlabel(x_label)
     ax.set_ylabel(r"$\tau$")
     ax.set_title(title)
     cbar = fig.colorbar(im, ax=ax)

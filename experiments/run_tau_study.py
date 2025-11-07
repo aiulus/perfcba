@@ -20,6 +20,20 @@ from .scheduler import TauScheduler
 from .structure import RAPSLearner, StructureConfig
 
 
+KNOB_LABELS = {
+    "graph_density": ("Graph Density", "graph densities"),
+    "parent_count": ("Parent Count", "parent counts"),
+    "intervention_size": ("Intervention Size", "intervention sizes"),
+    "alphabet": ("Alphabet Size", "alphabet sizes"),
+    "horizon": ("Horizon", "horizons"),
+}
+
+METRIC_LABELS = {
+    "cumulative_regret": "Cumulative regret",
+    "tto": "Time to optimality",
+}
+
+
 def subset_size_for_known_k(cfg: CausalBanditConfig, horizon: int) -> int:
     ell = cfg.ell
     n = cfg.n
@@ -225,12 +239,17 @@ def main() -> None:
 
     tau_values = args.tau_grid
     matrix = aggregate_heatmap(results, tau_values, knob_values, args.metric)
+    knob_label, knob_label_plural = KNOB_LABELS.get(
+        args.vary, (args.vary.replace("_", " ").title(), f"{args.vary.replace('_', ' ')}s")
+    )
+    metric_label = METRIC_LABELS.get(args.metric, args.metric.replace("_", " ").capitalize())
     plot_heatmap(
         matrix,
         tau_values=tau_values,
         knob_values=knob_values,
-        title=f"{args.metric} heatmap ({args.vary})",
-        cbar_label=args.metric,
+        title=f"{metric_label} for varying {knob_label_plural}",
+        cbar_label=metric_label,
+        x_label=knob_label,
         output_path=args.output_dir / f"heatmap_{args.metric}.png",
     )
 
