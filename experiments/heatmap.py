@@ -11,7 +11,7 @@ import numpy as np
 
 def plot_heatmap(
     values: np.ndarray,
-    tau_grid: Sequence[float],
+    tau_values: Sequence[float],
     knob_values: Sequence[float],
     *,
     title: str,
@@ -28,8 +28,8 @@ def plot_heatmap(
     )
     ax.set_xticks(range(len(knob_values)))
     ax.set_xticklabels([f"{v:.2f}" for v in knob_values], rotation=45, ha="right")
-    ax.set_yticks(range(len(tau_grid)))
-    ax.set_yticklabels([f"{tau:.2f}" for tau in tau_grid])
+    ax.set_yticks(range(len(tau_values)))
+    ax.set_yticklabels([f"{tau:.2f}" for tau in tau_values])
     ax.set_xlabel("Knob value")
     ax.set_ylabel(r"$\tau$")
     ax.set_title(title)
