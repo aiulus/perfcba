@@ -37,6 +37,7 @@ from .metrics import summarize
 from .scheduler import AdaptiveBurstConfig, RunSummary, build_scheduler
 from .timeline import encode_schedule, plot_time_allocation
 from .structure import RAPSLearner, StructureConfig
+from .sampler_cache import SamplerCache
 
 
 KNOB_LABELS = {
@@ -250,6 +251,8 @@ def prepare_instance(cfg: CausalBanditConfig, seed: int) -> PreparedInstance:
 
     rng = np.random.default_rng(seed)
     instance = build_random_scm(cfg, rng=rng)
+    sampler_cache = SamplerCache()
+    instance = dataclasses.replace(instance, sampler_cache=sampler_cache)
     optimal_mean = compute_optimal_mean(instance, rng)
     rng_state = copy.deepcopy(rng.bit_generator.state)
     return PreparedInstance(

@@ -22,6 +22,7 @@ from typing import Callable, Dict, Iterable, List, MutableMapping, Optional, Seq
 import numpy as np
 
 from ..SCM import SCM, Intervention
+from .sampler_cache import ArmKey, SamplerCache, SubsetKey
 
 NodeName = str
 Assignment = Tuple[int, ...]
@@ -86,6 +87,7 @@ class CausalBanditInstance:
     reward_node: NodeName
     reward_parents: Tuple[NodeName, ...]
     reward_means: Dict[Assignment, float]  # Bernoulli means conditioned on parents
+    sampler_cache: Optional[SamplerCache] = None
 
     def reward_mean_for(self, parent_assignment: MutableMapping[NodeName, int]) -> float:
         """Return E[Y | parents = parent_assignment]."""
@@ -105,9 +107,15 @@ class CausalBanditInstance:
     ) -> float:
         """Draw a single reward sample for the provided intervention arm."""
 
-        intervention = arm.as_intervention(self.node_names)
-        values = self.scm.sample(rng, intervention=intervention)
-        return float(values[self.reward_node])
+        def compute() -> float:
+            intervention = arm.as_intervention(self.node_names)
+            values = self.scm.sample(rng, intervention=intervention)
+            return float(values[self.reward_node])
+
+        if self.sampler_cache is None:
+            return compute()
+        arm_key: ArmKey = (tuple(arm.variables), tuple(arm.values))
+        return self.sampler_cache.sample_reward(arm_key=arm_key, rng=rng, compute=compute)
 
     def estimate_arm_mean(
         self,
@@ -117,12 +125,25 @@ class CausalBanditInstance:
     ) -> float:
         """Monte-Carlo estimate of ``E[Y | do(arm)]``."""
 
-        intervention = arm.as_intervention(self.node_names)
-        samples = [
-            float(self.scm.sample(rng, intervention=intervention)[self.reward_node])
-            for _ in range(max(1, int(n_mc)))
-        ]
-        return float(np.mean(samples))
+        n_samples = max(1, int(n_mc))
+
+        def compute() -> float:
+            intervention = arm.as_intervention(self.node_names)
+            samples = [
+                float(self.scm.sample(rng, intervention=intervention)[self.reward_node])
+                for _ in range(n_samples)
+            ]
+            return float(np.mean(samples))
+
+        if self.sampler_cache is None:
+            return compute()
+        arm_key: ArmKey = (tuple(arm.variables), tuple(arm.values))
+        return self.sampler_cache.estimate_arm_mean(
+            arm_key=arm_key,
+            n_mc=n_samples,
+            rng=rng,
+            compute=compute,
+        )
 
     def estimate_subset_mean(
         self,
@@ -133,15 +154,24 @@ class CausalBanditInstance:
     ) -> float:
         """Estimate ``E[Y | do(X_subset = assignments)``."""
 
-        if not subset:
-            # No intervention: return observational mean estimate.
-            samples = [
-                float(self.scm.sample(rng)[self.reward_node])
-                for _ in range(max(1, int(n_mc)))
-            ]
-            return float(np.mean(samples))
-        arm = InterventionArm(tuple(subset), tuple(assignments))
-        return self.estimate_arm_mean(arm, rng, n_mc=n_mc)
+        n_samples = max(1, int(n_mc))
+
+        def compute() -> float:
+            if not subset:
+                samples = [float(self.scm.sample(rng)[self.reward_node]) for _ in range(n_samples)]
+                return float(np.mean(samples))
+            arm = InterventionArm(tuple(subset), tuple(assignments))
+            return self.estimate_arm_mean(arm, rng, n_mc=n_samples)
+
+        if self.sampler_cache is None:
+            return compute()
+        subset_key: SubsetKey = (tuple(subset), tuple(assignments))
+        return self.sampler_cache.estimate_subset_mean(
+            subset_key=subset_key,
+            n_mc=n_samples,
+            rng=rng,
+            compute=compute,
+        )
 
 
 # ---------------------------------------------------------------------------
