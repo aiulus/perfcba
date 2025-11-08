@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import dataclasses
 import json
 import math
@@ -23,7 +24,12 @@ from .artifacts import (
     trial_identity_digest,
     write_trial_artifact,
 )
-from .causal_envs import CausalBanditConfig, InterventionSpace, build_random_scm
+from .causal_envs import (
+    CausalBanditConfig,
+    CausalBanditInstance,
+    InterventionSpace,
+    build_random_scm,
+)
 from .exploit import ArmBuilder, ParentAwareUCB
 from .grids import TAU_GRID, grid_values
 from .heatmap import plot_heatmap
@@ -128,10 +134,17 @@ def run_trial(
     effect_threshold: float,
     min_samples: int,
     adaptive_config: Optional[AdaptiveBurstConfig],
+    prepared: Optional[PreparedInstance] = None,
 ) -> Tuple[Dict[str, Any], RunSummary, float]:
-    rng = np.random.default_rng(seed)
-    instance = build_random_scm(base_cfg, rng=rng)
-    optimal_mean = compute_optimal_mean(instance, rng)
+    if prepared is not None:
+        instance = prepared.instance
+        optimal_mean = prepared.optimal_mean
+        rng = np.random.default_rng()
+        rng.bit_generator.state = copy.deepcopy(prepared.rng_state)
+    else:
+        rng = np.random.default_rng(seed)
+        instance = build_random_scm(base_cfg, rng=rng)
+        optimal_mean = compute_optimal_mean(instance, rng)
     space = InterventionSpace(
         instance.config.n,
         instance.config.ell,
@@ -219,6 +232,33 @@ def aggregate_heatmap(
         counts[t_idx, k_idx] += 1
     counts[counts == 0] = 1
     return matrix / counts
+
+
+@dataclasses.dataclass(frozen=True)
+class PreparedInstance:
+    """Cache of expensive per-(config, seed) artifacts."""
+
+    config: CausalBanditConfig
+    seed: int
+    instance: CausalBanditInstance
+    optimal_mean: float
+    rng_state: Dict[str, Any]
+
+
+def prepare_instance(cfg: CausalBanditConfig, seed: int) -> PreparedInstance:
+    """Build the SCM, compute the optimal mean once, and record the RNG state."""
+
+    rng = np.random.default_rng(seed)
+    instance = build_random_scm(cfg, rng=rng)
+    optimal_mean = compute_optimal_mean(instance, rng)
+    rng_state = copy.deepcopy(rng.bit_generator.state)
+    return PreparedInstance(
+        config=cfg,
+        seed=seed,
+        instance=instance,
+        optimal_mean=optimal_mean,
+        rng_state=rng_state,
+    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -429,6 +469,7 @@ def main() -> None:
     persist_dir: Optional[Path] = args.persist_trials
     reuse_dir: Optional[Path] = args.reuse_trials
     cli_args_snapshot = vars(args).copy()
+    prepared_cache: Dict[Tuple[CausalBanditConfig, int], PreparedInstance] = {}
 
     try:
         for knob_value in knob_values:
@@ -454,6 +495,7 @@ def main() -> None:
 
             for tau in args.tau_grid:
                 for seed in seeds:
+                    cache_key = (cfg, int(seed))
                     identity = make_trial_identity(
                         cfg,
                         horizon=current_horizon,
@@ -476,6 +518,10 @@ def main() -> None:
                         summary = artifact.summary
                         optimal_mean = artifact.optimal_mean
                     else:
+                        prepared_instance = prepared_cache.get(cache_key)
+                        if prepared_instance is None:
+                            prepared_instance = prepare_instance(cfg, seed)
+                            prepared_cache[cache_key] = prepared_instance
                         record, summary, optimal_mean = run_trial(
                             base_cfg=cfg,
                             horizon=current_horizon,
@@ -488,6 +534,7 @@ def main() -> None:
                             effect_threshold=args.effect_threshold,
                             min_samples=args.min_samples,
                             adaptive_config=adaptive_cfg,
+                            prepared=prepared_instance,
                         )
 
                     record = enrich_record_with_metadata(
