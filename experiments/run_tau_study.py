@@ -246,13 +246,14 @@ class PreparedInstance:
     rng_state: Dict[str, Any]
 
 
-def prepare_instance(cfg: CausalBanditConfig, seed: int) -> PreparedInstance:
+def prepare_instance(cfg: CausalBanditConfig, seed: int, *, enable_cache: bool) -> PreparedInstance:
     """Build the SCM, compute the optimal mean once, and record the RNG state."""
 
     rng = np.random.default_rng(seed)
     instance = build_random_scm(cfg, rng=rng)
-    sampler_cache = SamplerCache()
-    instance = dataclasses.replace(instance, sampler_cache=sampler_cache)
+    sampler_cache = SamplerCache() if enable_cache else None
+    if sampler_cache is not None:
+        instance = dataclasses.replace(instance, sampler_cache=sampler_cache)
     optimal_mean = compute_optimal_mean(instance, rng)
     rng_state = copy.deepcopy(rng.bit_generator.state)
     return PreparedInstance(
@@ -437,6 +438,12 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional directory containing cached trial artifacts to reuse.",
     )
+    parser.add_argument(
+        "--sampler-cache",
+        choices=["auto", "on", "off"],
+        default="auto",
+        help="Control whether sampler caches are attached to each SCM (default: auto=on).",
+    )
     return parser.parse_args()
 
 
@@ -472,7 +479,9 @@ def main() -> None:
     persist_dir: Optional[Path] = args.persist_trials
     reuse_dir: Optional[Path] = args.reuse_trials
     cli_args_snapshot = vars(args).copy()
-    prepared_cache: Dict[Tuple[CausalBanditConfig, int], PreparedInstance] = {}
+    prepared_cache: Dict[Tuple[CausalBanditConfig, int, str], PreparedInstance] = {}
+    cache_mode = args.sampler_cache
+    cache_enabled = cache_mode != "off"
 
     try:
         for knob_value in knob_values:
@@ -498,7 +507,7 @@ def main() -> None:
 
             for tau in args.tau_grid:
                 for seed in seeds:
-                    cache_key = (cfg, int(seed))
+                    cache_key = (cfg, int(seed), cache_mode)
                     identity = make_trial_identity(
                         cfg,
                         horizon=current_horizon,
@@ -523,7 +532,7 @@ def main() -> None:
                     else:
                         prepared_instance = prepared_cache.get(cache_key)
                         if prepared_instance is None:
-                            prepared_instance = prepare_instance(cfg, seed)
+                            prepared_instance = prepare_instance(cfg, seed, enable_cache=cache_enabled)
                             prepared_cache[cache_key] = prepared_instance
                         record, summary, optimal_mean = run_trial(
                             base_cfg=cfg,
