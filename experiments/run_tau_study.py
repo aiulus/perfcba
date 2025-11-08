@@ -271,7 +271,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--scheduler",
         choices=["interleaved", "two_phase", "etc", "adaptive_burst"],
-        default="interleaved",
+        default="two_phase",
     )
     parser.add_argument(
         "--etc-use-full-budget",
