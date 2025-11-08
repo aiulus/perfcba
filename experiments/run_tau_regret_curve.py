@@ -33,6 +33,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ell", type=int, default=2)
     parser.add_argument("--k", type=int, default=2)
     parser.add_argument("--m", type=int, default=None)
+    parser.add_argument(
+        "--scm-mode",
+        choices=["beta_dirichlet", "reference"],
+        default="beta_dirichlet",
+        help="SCM generation scheme for the sampled environments.",
+    )
+    parser.add_argument(
+        "--parent-effect",
+        type=float,
+        default=1.0,
+        help="Reference-mode mixing coefficient between base and parent-specific CPDs.",
+    )
     parser.add_argument("--T", type=int, default=10_000, help="Horizon length.")
     parser.add_argument("--tau", type=float, required=True, help="Tau budget for structure learning.")
     parser.add_argument("--knob-value", type=float, default=0.0, help="Metadata label recorded in artifacts.")
@@ -224,6 +236,8 @@ def main() -> None:
         k=args.k,
         m=m_value,
         edge_prob=2.0 / max(1, args.n),
+        scm_mode=args.scm_mode,
+        parent_effect=args.parent_effect,
     )
     horizon = args.T
     subset_size = subset_size_for_known_k(cfg, horizon)

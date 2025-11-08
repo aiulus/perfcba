@@ -26,6 +26,17 @@ Bandits”:
   `Experiment` harness, so any existing policy can be evaluated in this causal
   setting with only a few lines of code.
 
+### SCM generation modes
+
+`experiments.causal_envs.CausalBanditConfig` exposes an ``scm_mode`` switch so
+you can choose between the original Beta–Dirichlet sampler (`beta_dirichlet`)
+and a `reference` mode that mirrors the official
+[Unknown-Graph-Causal-Bandits](https://github.com/ban-epfl/Unknown-Graph-Causal-Bandits)
+environment (Dirichlet reward prior plus the `parent_effect` mixtures used in
+the paper). The tau-study drivers accept `--scm-mode` and `--parent-effect`, so
+you can, for example, run `--scm-mode reference --parent-effect 0.7` to match
+the paper’s default setting.
+
 ## Tau-scheduled study CLI
 
 Run the full budget-allocation study via:

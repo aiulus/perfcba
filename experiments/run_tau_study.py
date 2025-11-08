@@ -232,6 +232,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ell", type=int, default=2)
     parser.add_argument("--k", type=int, default=2)
     parser.add_argument("--m", type=int, default=None)
+    parser.add_argument(
+        "--scm-mode",
+        choices=["beta_dirichlet", "reference"],
+        default="beta_dirichlet",
+        help="SCM generation scheme for the sampled environments.",
+    )
+    parser.add_argument(
+        "--parent-effect",
+        type=float,
+        default=1.0,
+        help="Reference-mode mixing coefficient between base and parent-specific CPDs.",
+    )
     parser.add_argument("--T", type=int, default=10_000)
     parser.add_argument("--tau-grid", type=float, nargs="*", default=TAU_GRID)
     parser.add_argument("--seeds", type=str, default="0:9", help="Seed range start:end.")
@@ -375,6 +387,8 @@ def main() -> None:
         k=args.k,
         m=m_value,
         edge_prob=2.0 / max(1, args.n),
+        scm_mode=args.scm_mode,
+        parent_effect=args.parent_effect,
     )
     knob_values = grid_values(args.vary, n=args.n, k=args.k)
     results: List[Dict[str, Any]] = []
@@ -393,37 +407,14 @@ def main() -> None:
         for knob_value in knob_values:
             cfg = base_cfg
             if args.vary == "graph_density":
-                cfg = CausalBanditConfig(
-                    n=cfg.n,
-                    ell=cfg.ell,
-                    k=cfg.k,
-                    m=cfg.m,
-                    edge_prob=float(knob_value),
-                )
+                cfg = dataclasses.replace(cfg, edge_prob=float(knob_value))
             elif args.vary == "parent_count":
-                cfg = CausalBanditConfig(
-                    n=cfg.n,
-                    ell=cfg.ell,
-                    k=int(knob_value),
-                    m=max(int(knob_value), cfg.m),
-                    edge_prob=cfg.edge_prob,
-                )
+                new_k = int(knob_value)
+                cfg = dataclasses.replace(cfg, k=new_k, m=max(new_k, cfg.m))
             elif args.vary == "intervention_size":
-                cfg = CausalBanditConfig(
-                    n=cfg.n,
-                    ell=cfg.ell,
-                    k=cfg.k,
-                    m=int(knob_value),
-                    edge_prob=cfg.edge_prob,
-                )
+                cfg = dataclasses.replace(cfg, m=int(knob_value))
             elif args.vary == "alphabet":
-                cfg = CausalBanditConfig(
-                    n=cfg.n,
-                    ell=int(knob_value),
-                    k=cfg.k,
-                    m=cfg.m,
-                    edge_prob=cfg.edge_prob,
-                )
+                cfg = dataclasses.replace(cfg, ell=int(knob_value))
             elif args.vary == "horizon":
                 pass  # handled via args.T when running trials
 

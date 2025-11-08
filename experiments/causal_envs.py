@@ -25,6 +25,8 @@ from ..SCM import SCM, Intervention
 NodeName = str
 Assignment = Tuple[int, ...]
 
+SCM_MODES: Tuple[str, ...] = ("beta_dirichlet", "reference")
+
 
 # ---------------------------------------------------------------------------
 # Configuration and instance containers
@@ -42,6 +44,8 @@ class CausalBanditConfig:
     edge_prob: float = 0.3     # probability of an edge between covariates (respecting acyclicity)
     reward_alpha: float = 2.0  # parameters of Beta prior for reward Bernoulli means
     reward_beta: float = 2.0
+    scm_mode: str = "beta_dirichlet"  # sampling style for conditional probability tables
+    parent_effect: float = 1.0        # reference-mode mixing between base and parent-specific CPDs
     seed: Optional[int] = None
 
     def __post_init__(self) -> None:
@@ -57,6 +61,10 @@ class CausalBanditConfig:
             raise ValueError("edge_prob must be in [0, 1]")
         if self.reward_alpha <= 0 or self.reward_beta <= 0:
             raise ValueError("reward_alpha and reward_beta must be positive")
+        if self.scm_mode not in SCM_MODES:
+            raise ValueError(f"scm_mode must be one of {SCM_MODES}, got {self.scm_mode!r}")
+        if not (0.0 <= self.parent_effect <= 1.0):
+            raise ValueError("parent_effect must be in [0, 1]")
 
     def rng(self) -> np.random.Generator:
         """Return a generator seeded as requested (fresh instance each call)."""
@@ -148,11 +156,28 @@ def _all_assignments(num_parents: int, domain: int) -> Iterable[Assignment]:
     yield from itertools.product(range(domain), repeat=num_parents)
 
 
-def _sample_covariate_cpt(num_parents: int, ell: int, rng: np.random.Generator) -> Dict[Assignment, np.ndarray]:
+def _sample_covariate_cpt(
+    num_parents: int,
+    ell: int,
+    rng: np.random.Generator,
+    *,
+    mode: str,
+    parent_effect: float,
+) -> Dict[Assignment, np.ndarray]:
     table: Dict[Assignment, np.ndarray] = {}
-    base = np.ones(ell, dtype=float)
-    for assignment in _all_assignments(num_parents, ell):
-        table[assignment] = rng.dirichlet(base)
+    assignments = _all_assignments(num_parents, ell)
+    if mode == "reference":
+        base = rng.dirichlet(np.ones(ell, dtype=float))
+        alpha = np.ones(ell, dtype=float)
+        for assignment in assignments:
+            rnd = rng.dirichlet(alpha)
+            probs = (1.0 - parent_effect) * base + parent_effect * rnd
+            probs = probs / probs.sum()
+            table[assignment] = probs
+        return table
+    base_alpha = np.ones(ell, dtype=float)
+    for assignment in assignments:
+        table[assignment] = rng.dirichlet(base_alpha)
     return table
 
 
@@ -162,11 +187,17 @@ def _sample_reward_cpt(
     rng: np.random.Generator,
     alpha: float,
     beta: float,
+    *,
+    mode: str,
 ) -> Dict[Assignment, np.ndarray]:
     table: Dict[Assignment, np.ndarray] = {}
     for assignment in _all_assignments(num_parents, ell):
-        p = rng.beta(alpha, beta)
-        table[assignment] = np.array([1.0 - p, p], dtype=float)
+        if mode == "reference":
+            probs = rng.dirichlet(np.ones(2, dtype=float))
+        else:
+            p = rng.beta(alpha, beta)
+            probs = np.array([1.0 - p, p], dtype=float)
+        table[assignment] = probs
     return table
 
 
@@ -191,7 +222,14 @@ def build_random_scm(config: CausalBanditConfig, *, rng: Optional[np.random.Gene
     parents[reward_node] = [x_nodes[idx] for idx in reward_parent_indices]
 
     structural_functions: Dict[NodeName, Callable[[Dict[NodeName, int], np.random.Generator], int]] = {}
-    reward_table = _sample_reward_cpt(config.k, config.ell, rng, config.reward_alpha, config.reward_beta)
+    reward_table = _sample_reward_cpt(
+        config.k,
+        config.ell,
+        rng,
+        config.reward_alpha if config.scm_mode != "reference" else 1.0,
+        config.reward_beta if config.scm_mode != "reference" else 1.0,
+        mode=config.scm_mode,
+    )
 
     def make_node_fn(name: NodeName, parent_names: Sequence[NodeName], table: Dict[Assignment, np.ndarray], domain: int):
         parent_tuple = tuple(parent_names)
@@ -205,7 +243,13 @@ def build_random_scm(config: CausalBanditConfig, *, rng: Optional[np.random.Gene
 
     for node in x_nodes:
         par_names = parents[node]
-        cpt = _sample_covariate_cpt(len(par_names), config.ell, rng)
+        cpt = _sample_covariate_cpt(
+            len(par_names),
+            config.ell,
+            rng,
+            mode=config.scm_mode,
+            parent_effect=config.parent_effect,
+        )
         structural_functions[node] = make_node_fn(node, par_names, cpt, config.ell)
 
     structural_functions[reward_node] = make_node_fn(reward_node, parents[reward_node], reward_table, 2)
