@@ -467,6 +467,16 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Reduce min_samples and Monte Carlo sample counts by 4x for faster (but noisier) runs.",
     )
+    parser.add_argument(
+        "--very-small",
+        action="store_true",
+        help="Reduce min_samples/MC counts by 8x (even faster, more noise).",
+    )
+    parser.add_argument(
+        "--tiny",
+        action="store_true",
+        help="Reduce min_samples/MC counts by 16x (fastest, highest noise).",
+    )
     return parser.parse_args()
 
 
@@ -508,7 +518,18 @@ def main() -> None:
     ] = {}
     cache_mode = args.sampler_cache
     cache_enabled = cache_mode != "off"
-    sample_scale = 0.25 if args.small else 1.0
+
+    flag_count = sum(bool(flag) for flag in (args.small, args.very_small, args.tiny))
+    if flag_count > 1:
+        raise ValueError("Only one of --small/--very-small/--tiny may be specified.")
+    if args.tiny:
+        sample_scale = 1.0 / 16.0
+    elif args.very_small:
+        sample_scale = 1.0 / 8.0
+    elif args.small:
+        sample_scale = 0.25
+    else:
+        sample_scale = 1.0
 
     def _scaled(value: int) -> int:
         return max(1, int(math.ceil(value * sample_scale)))
