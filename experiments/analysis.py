@@ -38,6 +38,8 @@ except Exception:  # pragma: no cover - SciPy may not be installed in CI.
 
 LOGGER = logging.getLogger(__name__)
 
+KNOWN_METRICS = ("cumulative_regret", "tto", "optimal_rate")
+
 @dataclass
 class LoadedResults:
     records: List[Dict[str, Any]]
@@ -605,7 +607,7 @@ def parse_args() -> argparse.Namespace:
         "--metrics",
         nargs="+",
         default=["cumulative_regret"],
-        help="Metrics to analyze (must match keys in results).",
+        help="Metrics to analyze (must match keys in results, or use 'all').",
     )
     parser.add_argument("--out-dir", type=Path, required=True, help="Directory to store plots and reports.")
     parser.add_argument("--sigma", type=float, default=0.5, help="Gaussian smoothing sigma used for gradient visualization.")
@@ -618,6 +620,15 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s:%(message)s")
+
+    requested_metrics = args.metrics
+    if any(metric.lower() == "all" for metric in requested_metrics):
+        if any(metric.lower() != "all" for metric in requested_metrics):
+            LOGGER.warning("--metrics 'all' overrides the other entries; analyzing all metrics.")
+        metrics_to_analyze: Sequence[str] = list(KNOWN_METRICS)
+    else:
+        metrics_to_analyze = requested_metrics
+
     loaded = load_results(args.results)
     g_values = compute_log_density(loaded.knob_values, args.n) if args.vary == "graph_density" else None
     if args.vary == "graph_density" and g_values is None:
@@ -632,7 +643,7 @@ def main() -> None:
             record["g_density"] = g_values[idx]
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
-    for metric in args.metrics:
+    for metric in metrics_to_analyze:
         matrix, per_cell_samples, finished_rates = aggregate_matrix(
             loaded.records,
             loaded.tau_values,
