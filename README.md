@@ -1,4 +1,17 @@
 
+## Installation
+
+- **Python:** 3.9+ (tested on CPython).
+- **Dependencies:** `numpy`, `tqdm`, `matplotlib`; `scipy` is optional but enables smoother gradients/statistics in the analysis CLI.
+- **Editable install (recommended):**
+
+  ```bash
+  python -m pip install --upgrade pip
+  python -m pip install -e .
+  ```
+
+Run the commands below from the repository root (so `perfcba` is importable) or inside the environment created by the editable install.
+
 ## Causal bandit utilities
 
 The repository now includes helpers for constructing discrete causal bandit
@@ -29,7 +42,27 @@ python -m perfcba.experiments.run_tau_study \
 The CLI sweeps `tau`, generates SCMs via `CausalBanditConfig`, interleaves
 structure learning (`experiments.structure.RAPSLearner`) with exploitation
 (`experiments.exploit.ParentAwareUCB`), records JSONL summaries, and emits
-heatmaps under the specified output directory.
+heatmaps under the specified output directory (e.g.,
+`results/tau_study/graph_density/`). Each JSONL row captures the seed, knob
+value, scheduler, tau, and metrics, so downstream tools can consume the file
+directly.
+
+### Regret-curve driver
+
+Use the reduced driver to focus on classical cumulative regret curves for a
+single `tau` while reusing the same artifact format:
+
+```bash
+python -m perfcba.experiments.run_tau_regret_curve \
+  --tau 0.2 \
+  --n 20 --ell 2 --k 2 --m 2 --T 20000 \
+  --seeds 0:9 \
+  --artifact-dir results/tau_regret/tau_0.2 \
+  --plot-path results/tau_regret/tau_0.2/regret_curve.png
+```
+
+If `--plot-only` is supplied, the script skips simulation and reads the existing
+artifacts produced by either CLI.
 
 ### Post-processing and hypothesis testing
 
