@@ -55,6 +55,14 @@ METRIC_LABELS = {
 }
 
 
+@dataclasses.dataclass(frozen=True)
+class SamplingSettings:
+    min_samples: int
+    structure_mc_samples: int
+    arm_mc_samples: int
+    optimal_mean_mc_samples: int
+
+
 def subset_size_for_known_k(cfg: CausalBanditConfig, horizon: int) -> int:
     ell = cfg.ell
     n = cfg.n
@@ -133,7 +141,7 @@ def run_trial(
     scheduler_mode: str,
     use_full_budget: bool,
     effect_threshold: float,
-    min_samples: int,
+    sampling: SamplingSettings,
     adaptive_config: Optional[AdaptiveBurstConfig],
     prepared: Optional[PreparedInstance] = None,
 ) -> Tuple[Dict[str, Any], RunSummary, float]:
@@ -154,14 +162,18 @@ def run_trial(
     )
     structure = RAPSLearner(
         instance,
-        StructureConfig(effect_threshold=effect_threshold, min_samples_per_value=min_samples),
+        StructureConfig(
+            effect_threshold=effect_threshold,
+            min_samples_per_value=sampling.min_samples,
+            mean_mc_samples=sampling.structure_mc_samples,
+        ),
     )
     policy = ParentAwareUCB()
     arm_builder = ArmBuilder(
         instance,
         space,
         subset_size=subset_size,
-        mc_samples=1024,
+        mc_samples=sampling.arm_mc_samples,
     )
     scheduler = build_scheduler(
         mode=scheduler_mode,  # type: ignore[arg-type]
@@ -246,7 +258,13 @@ class PreparedInstance:
     rng_state: Dict[str, Any]
 
 
-def prepare_instance(cfg: CausalBanditConfig, seed: int, *, enable_cache: bool) -> PreparedInstance:
+def prepare_instance(
+    cfg: CausalBanditConfig,
+    seed: int,
+    *,
+    enable_cache: bool,
+    sampling: SamplingSettings,
+) -> PreparedInstance:
     """Build the SCM, compute the optimal mean once, and record the RNG state."""
 
     rng = np.random.default_rng(seed)
@@ -254,7 +272,7 @@ def prepare_instance(cfg: CausalBanditConfig, seed: int, *, enable_cache: bool) 
     sampler_cache = SamplerCache() if enable_cache else None
     if sampler_cache is not None:
         instance = dataclasses.replace(instance, sampler_cache=sampler_cache)
-    optimal_mean = compute_optimal_mean(instance, rng)
+    optimal_mean = compute_optimal_mean(instance, rng, mc_samples=sampling.optimal_mean_mc_samples)
     rng_state = copy.deepcopy(rng.bit_generator.state)
     return PreparedInstance(
         config=cfg,
@@ -444,6 +462,11 @@ def parse_args() -> argparse.Namespace:
         default="auto",
         help="Control whether sampler caches are attached to each SCM (default: auto=on).",
     )
+    parser.add_argument(
+        "--small",
+        action="store_true",
+        help="Reduce min_samples and Monte Carlo sample counts by 4x for faster (but noisier) runs.",
+    )
     return parser.parse_args()
 
 
@@ -479,9 +502,23 @@ def main() -> None:
     persist_dir: Optional[Path] = args.persist_trials
     reuse_dir: Optional[Path] = args.reuse_trials
     cli_args_snapshot = vars(args).copy()
-    prepared_cache: Dict[Tuple[CausalBanditConfig, int, str], PreparedInstance] = {}
+    prepared_cache: Dict[
+        Tuple[CausalBanditConfig, int, str, int, int, int, int],
+        PreparedInstance,
+    ] = {}
     cache_mode = args.sampler_cache
     cache_enabled = cache_mode != "off"
+    sample_scale = 0.25 if args.small else 1.0
+
+    def _scaled(value: int) -> int:
+        return max(1, int(math.ceil(value * sample_scale)))
+
+    sampling = SamplingSettings(
+        min_samples=max(1, int(math.ceil(args.min_samples * sample_scale))),
+        structure_mc_samples=_scaled(512),
+        arm_mc_samples=_scaled(1024),
+        optimal_mean_mc_samples=_scaled(2048),
+    )
 
     try:
         for knob_value in knob_values:
@@ -507,7 +544,15 @@ def main() -> None:
 
             for tau in args.tau_grid:
                 for seed in seeds:
-                    cache_key = (cfg, int(seed), cache_mode)
+                    cache_key = (
+                        cfg,
+                        int(seed),
+                        cache_mode,
+                        sampling.min_samples,
+                        sampling.structure_mc_samples,
+                        sampling.arm_mc_samples,
+                        sampling.optimal_mean_mc_samples,
+                    )
                     identity = make_trial_identity(
                         cfg,
                         horizon=current_horizon,
@@ -518,8 +563,11 @@ def main() -> None:
                         subset_size=subset_size,
                         use_full_budget=args.etc_use_full_budget,
                         effect_threshold=args.effect_threshold,
-                        min_samples=args.min_samples,
+                        min_samples=sampling.min_samples,
                         adaptive_config=adaptive_cfg_dict,
+                        structure_mc_samples=sampling.structure_mc_samples,
+                        arm_mc_samples=sampling.arm_mc_samples,
+                        optimal_mean_mc_samples=sampling.optimal_mean_mc_samples,
                     )
 
                     artifact = load_trial_artifact(reuse_dir, identity) if reuse_dir is not None else None
@@ -532,7 +580,12 @@ def main() -> None:
                     else:
                         prepared_instance = prepared_cache.get(cache_key)
                         if prepared_instance is None:
-                            prepared_instance = prepare_instance(cfg, seed, enable_cache=cache_enabled)
+                            prepared_instance = prepare_instance(
+                                cfg,
+                                seed,
+                                enable_cache=cache_enabled,
+                                sampling=sampling,
+                            )
                             prepared_cache[cache_key] = prepared_instance
                         record, summary, optimal_mean = run_trial(
                             base_cfg=cfg,
@@ -544,7 +597,7 @@ def main() -> None:
                             scheduler_mode=args.scheduler,
                             use_full_budget=args.etc_use_full_budget,
                             effect_threshold=args.effect_threshold,
-                            min_samples=args.min_samples,
+                            sampling=sampling,
                             adaptive_config=adaptive_cfg,
                             prepared=prepared_instance,
                         )

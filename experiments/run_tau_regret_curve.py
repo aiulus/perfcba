@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import json
+import math
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -21,6 +22,7 @@ from .run_tau_study import (
     adaptive_config_from_args,
     enrich_record_with_metadata,
     run_trial,
+    SamplingSettings,
     subset_size_for_known_k,
 )
 
@@ -67,6 +69,11 @@ def parse_args() -> argparse.Namespace:
         help="Structure learner effect threshold.",
     )
     parser.add_argument("--min-samples", type=int, default=20, help="Structure learner samples per value.")
+    parser.add_argument(
+        "--small",
+        action="store_true",
+        help="Reduce min_samples and Monte Carlo sample counts by 4x for faster (but noisier) runs.",
+    )
     parser.add_argument(
         "--artifact-dir",
         type=Path,
@@ -124,7 +131,7 @@ def ensure_artifacts(
     scheduler: str,
     use_full_budget: bool,
     effect_threshold: float,
-    min_samples: int,
+    sampling: SamplingSettings,
     adaptive_cfg,
     adaptive_cfg_dict: Optional[Dict[str, object]],
     artifact_dir: Path,
@@ -142,8 +149,11 @@ def ensure_artifacts(
             subset_size=subset_size,
             use_full_budget=use_full_budget,
             effect_threshold=effect_threshold,
-            min_samples=min_samples,
+            min_samples=sampling.min_samples,
             adaptive_config=adaptive_cfg_dict,
+            structure_mc_samples=sampling.structure_mc_samples,
+            arm_mc_samples=sampling.arm_mc_samples,
+            optimal_mean_mc_samples=sampling.optimal_mean_mc_samples,
         )
         artifact = load_trial_artifact(artifact_dir, identity)
         if artifact is not None:
@@ -158,7 +168,7 @@ def ensure_artifacts(
             scheduler_mode=scheduler,
             use_full_budget=use_full_budget,
             effect_threshold=effect_threshold,
-            min_samples=min_samples,
+            sampling=sampling,
             adaptive_config=adaptive_cfg,
         )
         record = enrich_record_with_metadata(
@@ -195,7 +205,7 @@ def load_artifacts_for_seeds(
     scheduler: str,
     use_full_budget: bool,
     effect_threshold: float,
-    min_samples: int,
+    sampling: SamplingSettings,
     adaptive_cfg_dict: Optional[Dict[str, object]],
     artifact_dir: Path,
 ) -> List[TrialArtifact]:
@@ -211,8 +221,11 @@ def load_artifacts_for_seeds(
             subset_size=subset_size,
             use_full_budget=use_full_budget,
             effect_threshold=effect_threshold,
-            min_samples=min_samples,
+            min_samples=sampling.min_samples,
             adaptive_config=adaptive_cfg_dict,
+            structure_mc_samples=sampling.structure_mc_samples,
+            arm_mc_samples=sampling.arm_mc_samples,
+            optimal_mean_mc_samples=sampling.optimal_mean_mc_samples,
         )
         artifact = load_trial_artifact(artifact_dir, identity)
         if artifact is None:
@@ -244,6 +257,17 @@ def main() -> None:
     adaptive_cfg = adaptive_config_from_args(args, horizon)
     adaptive_cfg_dict = dataclasses.asdict(adaptive_cfg) if adaptive_cfg is not None else None
     cli_args_snapshot = vars(args).copy()
+    sample_scale = 0.25 if args.small else 1.0
+
+    def _scaled(value: int) -> int:
+        return max(1, int(math.ceil(value * sample_scale)))
+
+    sampling = SamplingSettings(
+        min_samples=max(1, int(math.ceil(args.min_samples * sample_scale))),
+        structure_mc_samples=_scaled(512),
+        arm_mc_samples=_scaled(1024),
+        optimal_mean_mc_samples=_scaled(2048),
+    )
 
     if not args.plot_only:
         ensure_artifacts(
@@ -256,7 +280,7 @@ def main() -> None:
             scheduler=args.scheduler,
             use_full_budget=args.etc_use_full_budget,
             effect_threshold=args.effect_threshold,
-            min_samples=args.min_samples,
+            sampling=sampling,
             adaptive_cfg=adaptive_cfg,
             adaptive_cfg_dict=adaptive_cfg_dict,
             artifact_dir=args.artifact_dir,
@@ -273,7 +297,7 @@ def main() -> None:
         scheduler=args.scheduler,
         use_full_budget=args.etc_use_full_budget,
         effect_threshold=args.effect_threshold,
-        min_samples=args.min_samples,
+        sampling=sampling,
         adaptive_cfg_dict=adaptive_cfg_dict,
         artifact_dir=args.artifact_dir,
     )

@@ -48,6 +48,9 @@ class TrialIdentity:
     effect_threshold: float
     min_samples: int
     adaptive_config: Optional[Dict[str, Any]]
+    structure_mc_samples: int = 512
+    arm_mc_samples: int = 1024
+    optimal_mean_mc_samples: int = 2048
 
     def payload(self) -> Dict[str, Any]:
         return {
@@ -62,6 +65,9 @@ class TrialIdentity:
             "effect_threshold": self.effect_threshold,
             "min_samples": self.min_samples,
             "adaptive_config": self.adaptive_config,
+            "structure_mc_samples": self.structure_mc_samples,
+            "arm_mc_samples": self.arm_mc_samples,
+            "optimal_mean_mc_samples": self.optimal_mean_mc_samples,
         }
 
 
@@ -78,6 +84,9 @@ def make_trial_identity(
     effect_threshold: float,
     min_samples: int,
     adaptive_config: Optional[Dict[str, Any]],
+    structure_mc_samples: int = 512,
+    arm_mc_samples: int = 1024,
+    optimal_mean_mc_samples: int = 2048,
 ) -> TrialIdentity:
     return TrialIdentity(
         config=_serialize_config(config),
@@ -91,6 +100,9 @@ def make_trial_identity(
         effect_threshold=float(effect_threshold),
         min_samples=int(min_samples),
         adaptive_config=_serialize_adaptive_cfg(adaptive_config),
+        structure_mc_samples=int(structure_mc_samples),
+        arm_mc_samples=int(arm_mc_samples),
+        optimal_mean_mc_samples=int(optimal_mean_mc_samples),
     )
 
 

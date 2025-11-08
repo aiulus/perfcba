@@ -17,6 +17,7 @@ class StructureConfig:
     effect_threshold: float = 0.05
     min_samples_per_value: int = 20
     max_steps: Optional[int] = None
+    mean_mc_samples: int = 512
 
 
 @dataclass
@@ -114,7 +115,7 @@ class RAPSLearner(StructureLearner):
         value = self._select_value(idx)
         arm = InterventionArm(variables=(idx,), values=(value,))
         reward = self.instance.sample_reward(arm, rng)
-        expected_mean = self.instance.estimate_arm_mean(arm, rng, n_mc=512)
+        expected_mean = self.instance.estimate_arm_mean(arm, rng, n_mc=self.config.mean_mc_samples)
         total, count = self._stats[idx][value]
         total += reward
         count += 1
