@@ -33,8 +33,8 @@ from typing import Any, Dict, Iterable, List, MutableMapping, Optional, Sequence
 
 import numpy as np
 
-from experiments.causal_envs import CausalBanditConfig, build_random_scm
-from experiments.structure import RAPSLearner, StructureConfig
+from ..experiments.causal_envs import CausalBanditConfig, build_random_scm
+from ..experiments.structure import RAPSLearner, StructureConfig
 
 
 @dataclass

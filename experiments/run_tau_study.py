@@ -229,6 +229,13 @@ def parse_args() -> argparse.Namespace:
         required=True,
         help="Environment knob to sweep.",
     )
+    parser.add_argument(
+        "--parent-grid",
+        type=int,
+        nargs="+",
+        default=None,
+        help="Override the default parent counts when --vary parent_count is used.",
+    )
     parser.add_argument("--n", type=int, default=50)
     parser.add_argument("--ell", type=int, default=2)
     parser.add_argument("--k", type=int, default=2)
@@ -398,7 +405,10 @@ def main() -> None:
         parent_effect=args.parent_effect,
         reward_logit_scale=args.reward_logit_scale,
     )
-    knob_values = grid_values(args.vary, n=args.n, k=args.k)
+    if args.vary == "parent_count" and args.parent_grid:
+        knob_values = [int(value) for value in args.parent_grid]
+    else:
+        knob_values = grid_values(args.vary, n=args.n, k=args.k)
     results: List[Dict[str, Any]] = []
     total_trials = len(knob_values) * len(args.tau_grid) * len(seeds)
     progress = tqdm(total=total_trials, desc="Tau study", unit="trial")

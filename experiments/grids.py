@@ -24,7 +24,8 @@ GRIDS = {
     "parent_count": [1, 2, 4, 8],
     "intervention_size": lambda k, n: [max(1, k // 2), k, min(k + 2, n)],
     "alphabet": [2, 4],
-    "horizon": [2_000, 10_000, 50_000],
+    "horizon": [100],
+    #"horizon": [2_000, 10_000, 50_000],
     # Scales < 1 push Bernoulli means toward 0.5 (higher variance); > 1 make them sharper.
     "arm_variance": [0.5, 0.75, 1.0, 1.5, 2.0],
 }
