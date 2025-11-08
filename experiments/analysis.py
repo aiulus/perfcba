@@ -21,7 +21,7 @@ import math
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import logging
 
@@ -40,7 +40,7 @@ LOGGER = logging.getLogger(__name__)
 
 @dataclass
 class LoadedResults:
-    records: List[Dict[str, float]]
+    records: List[Dict[str, Any]]
     tau_values: List[float]
     knob_values: List[float]
     metric_keys: List[str]
@@ -60,7 +60,7 @@ class RegressionOutput:
 
 
 def load_results(path: Path) -> LoadedResults:
-    records: List[Dict[str, float]] = []
+    records: List[Dict[str, Any]] = []
     tau_values: set[float] = set()
     knob_values: set[float] = set()
     metric_keys: set[str] = set()
@@ -70,7 +70,7 @@ def load_results(path: Path) -> LoadedResults:
             line = line.strip()
             if not line:
                 continue
-            record: Dict[str, float] = json.loads(line)
+            record: Dict[str, Any] = json.loads(line)
             records.append(record)
             tau_values.add(float(record["tau"]))
             knob_values.add(float(record["knob_value"]))
@@ -85,6 +85,10 @@ def load_results(path: Path) -> LoadedResults:
                     "seed",
                     "instance_id",
                     "density",
+                    "horizon",
+                    "scheduler",
+                    "finished_discovery",
+                    "finished_discovery_round",
                 }
                 and isinstance(record[key], (int, float))
             )
@@ -108,7 +112,7 @@ def compute_log_density(values: Sequence[float], n: Optional[int]) -> Optional[L
 
 
 def aggregate_matrix(
-    records: Sequence[Mapping[str, float]],
+    records: Sequence[Mapping[str, Any]],
     tau_values: Sequence[float],
     knob_values: Sequence[float],
     metric: str,
@@ -419,7 +423,7 @@ def _ols_with_covariance(
 
 
 def test_density_tau_interaction(
-    records: Sequence[Mapping[str, float]],
+    records: Sequence[Mapping[str, Any]],
     *,
     metric: str,
     g_key: str = "g_density",
@@ -521,7 +525,7 @@ def column_spearman(matrix: np.ndarray, tau_values: Sequence[float]) -> Dict[str
 
 
 def slope_vs_density(
-    records: Sequence[Mapping[str, float]],
+    records: Sequence[Mapping[str, Any]],
     knob_values: Sequence[float],
     g_values: Optional[Sequence[float]],
     metric: str,

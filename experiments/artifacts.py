@@ -99,6 +99,11 @@ def _identity_digest(identity: TrialIdentity) -> str:
     return hashlib.sha1(payload).hexdigest()
 
 
+def trial_identity_digest(identity: TrialIdentity) -> str:
+    """Return the stable digest used in artifact filenames."""
+    return _identity_digest(identity)
+
+
 def artifact_filename(identity: TrialIdentity) -> str:
     knob_tag = _format_tag(identity.knob_value)
     tau_tag = _format_tag(identity.tau)
@@ -165,7 +170,7 @@ def _deserialize_summary(payload: Dict[str, Any]) -> RunSummary:
 @dataclass
 class TrialArtifact:
     identity: TrialIdentity
-    record: Dict[str, float]
+    record: Dict[str, Any]
     summary: RunSummary
     optimal_mean: float
     metadata: Dict[str, Any]

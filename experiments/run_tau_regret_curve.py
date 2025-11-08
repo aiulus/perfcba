@@ -17,7 +17,12 @@ from .artifacts import (
 )
 from .causal_envs import CausalBanditConfig
 from .regret_curves import aggregate_regret_curves, plot_regret_band
-from .run_tau_study import adaptive_config_from_args, run_trial, subset_size_for_known_k
+from .run_tau_study import (
+    adaptive_config_from_args,
+    enrich_record_with_metadata,
+    run_trial,
+    subset_size_for_known_k,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -143,6 +148,13 @@ def ensure_artifacts(
             effect_threshold=effect_threshold,
             min_samples=min_samples,
             adaptive_config=adaptive_cfg,
+        )
+        record = enrich_record_with_metadata(
+            record,
+            summary=summary,
+            identity=identity,
+            horizon=horizon,
+            scheduler=scheduler,
         )
         metadata = build_metadata(
             cli_args={

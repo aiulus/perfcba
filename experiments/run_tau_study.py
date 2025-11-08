@@ -9,16 +9,18 @@ import math
 from collections import defaultdict
 from itertools import combinations, product
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 from tqdm.auto import tqdm
 
 from .artifacts import (
     TrialArtifact,
+    TrialIdentity,
     build_metadata,
     load_trial_artifact,
     make_trial_identity,
+    trial_identity_digest,
     write_trial_artifact,
 )
 from .causal_envs import CausalBanditConfig, InterventionSpace, build_random_scm
@@ -125,7 +127,7 @@ def run_trial(
     effect_threshold: float,
     min_samples: int,
     adaptive_config: Optional[AdaptiveBurstConfig],
-) -> Tuple[Dict[str, float], RunSummary, float]:
+) -> Tuple[Dict[str, Any], RunSummary, float]:
     rng = np.random.default_rng(seed)
     instance = build_random_scm(base_cfg, rng=rng)
     optimal_mean = compute_optimal_mean(instance, rng)
@@ -159,7 +161,8 @@ def run_trial(
     )
     summary = scheduler.run(rng)
     metrics = summarize(summary.logs, optimal_mean)
-    record = {
+    finished_round = summary.finished_discovery_round
+    record: Dict[str, Any] = {
         "tau": tau,
         "knob_value": knob_value,
         "seed": seed,
@@ -168,12 +171,38 @@ def run_trial(
         "optimal_rate": metrics.optimal_action_rate,
         "structure_steps": summary.structure_steps,
         "parents_found": len(summary.final_parent_set),
+        "finished_discovery": finished_round is not None,
+        "finished_discovery_round": finished_round,
+        "horizon": horizon,
+        "scheduler": scheduler_mode,
     }
     return record, summary, optimal_mean
 
 
+def enrich_record_with_metadata(
+    record: Dict[str, Any],
+    *,
+    summary: RunSummary,
+    identity: TrialIdentity,
+    horizon: int,
+    scheduler: str,
+) -> Dict[str, Any]:
+    """Ensure each JSONL row carries the shared identifiers used by analysis."""
+    enriched = dict(record)
+    finished_round = summary.finished_discovery_round
+    enriched["finished_discovery"] = finished_round is not None
+    enriched["finished_discovery_round"] = int(finished_round) if finished_round is not None else None
+    enriched["instance_id"] = trial_identity_digest(identity)
+    enriched["horizon"] = int(horizon)
+    enriched["scheduler"] = str(scheduler)
+    enriched["tau"] = float(identity.tau)
+    enriched["knob_value"] = float(identity.knob_value)
+    enriched["seed"] = int(identity.seed)
+    return enriched
+
+
 def aggregate_heatmap(
-    results: Sequence[Dict[str, float]],
+    results: Sequence[Dict[str, Any]],
     tau_values: Sequence[float],
     knob_values: Sequence[float],
     metric_key: str,
@@ -348,7 +377,7 @@ def main() -> None:
         edge_prob=2.0 / max(1, args.n),
     )
     knob_values = grid_values(args.vary, n=args.n, k=args.k)
-    results: List[Dict[str, float]] = []
+    results: List[Dict[str, Any]] = []
     total_trials = len(knob_values) * len(args.tau_grid) * len(seeds)
     progress = tqdm(total=total_trials, desc="Tau study", unit="trial")
     timeline_dir: Optional[Path] = args.timeline_dir
@@ -420,6 +449,7 @@ def main() -> None:
                     )
 
                     artifact = load_trial_artifact(reuse_dir, identity) if reuse_dir is not None else None
+                    ran_trial = artifact is None
 
                     if artifact is not None:
                         record = artifact.record
@@ -439,23 +469,32 @@ def main() -> None:
                             min_samples=args.min_samples,
                             adaptive_config=adaptive_cfg,
                         )
-                        if persist_dir is not None:
-                            metadata = build_metadata(
-                                cli_args={
-                                    **cli_args_snapshot,
-                                    "tau": float(tau),
-                                    "seed": int(seed),
-                                    "knob_value": float(knob_value),
-                                }
-                            )
-                            artifact = TrialArtifact(
-                                identity=identity,
-                                record=record,
-                                summary=summary,
-                                optimal_mean=optimal_mean,
-                                metadata=metadata,
-                            )
-                            write_trial_artifact(persist_dir, artifact)
+
+                    record = enrich_record_with_metadata(
+                        record,
+                        summary=summary,
+                        identity=identity,
+                        horizon=current_horizon,
+                        scheduler=args.scheduler,
+                    )
+
+                    if persist_dir is not None and ran_trial:
+                        metadata = build_metadata(
+                            cli_args={
+                                **cli_args_snapshot,
+                                "tau": float(tau),
+                                "seed": int(seed),
+                                "knob_value": float(knob_value),
+                            }
+                        )
+                        trial_artifact = TrialArtifact(
+                            identity=identity,
+                            record=record,
+                            summary=summary,
+                            optimal_mean=optimal_mean,
+                            metadata=metadata,
+                        )
+                        write_trial_artifact(persist_dir, trial_artifact)
 
                     results.append(record)
                     if timeline_dir is not None:
