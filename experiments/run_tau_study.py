@@ -39,6 +39,7 @@ KNOB_LABELS = {
     "intervention_size": ("Intervention Size", "intervention sizes"),
     "alphabet": ("Alphabet Size", "alphabet sizes"),
     "horizon": ("Horizon", "horizons"),
+    "arm_variance": ("Arm Variance Scale", "arm variance scales"),
 }
 
 METRIC_LABELS = {
@@ -224,7 +225,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Tau-scheduled causal bandit study.")
     parser.add_argument(
         "--vary",
-        choices=["graph_density", "parent_count", "intervention_size", "alphabet", "horizon"],
+        choices=["graph_density", "parent_count", "intervention_size", "alphabet", "horizon", "arm_variance"],
         required=True,
         help="Environment knob to sweep.",
     )
@@ -243,6 +244,12 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=1.0,
         help="Reference-mode mixing coefficient between base and parent-specific CPDs.",
+    )
+    parser.add_argument(
+        "--reward-logit-scale",
+        type=float,
+        default=1.0,
+        help="Scale applied to Bernoulli logits to control per-arm variance.",
     )
     parser.add_argument("--T", type=int, default=10_000)
     parser.add_argument("--tau-grid", type=float, nargs="*", default=TAU_GRID)
@@ -389,6 +396,7 @@ def main() -> None:
         edge_prob=2.0 / max(1, args.n),
         scm_mode=args.scm_mode,
         parent_effect=args.parent_effect,
+        reward_logit_scale=args.reward_logit_scale,
     )
     knob_values = grid_values(args.vary, n=args.n, k=args.k)
     results: List[Dict[str, Any]] = []
@@ -417,6 +425,8 @@ def main() -> None:
                 cfg = dataclasses.replace(cfg, ell=int(knob_value))
             elif args.vary == "horizon":
                 pass  # handled via args.T when running trials
+            elif args.vary == "arm_variance":
+                cfg = dataclasses.replace(cfg, reward_logit_scale=float(knob_value))
 
             current_horizon = args.T if args.vary != "horizon" else int(knob_value)
             subset_size = subset_size_for_known_k(cfg, current_horizon)

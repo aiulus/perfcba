@@ -15,6 +15,7 @@ This module provides two main building blocks:
 from __future__ import annotations
 
 import itertools
+import math
 from dataclasses import dataclass
 from typing import Callable, Dict, Iterable, List, MutableMapping, Optional, Sequence, Tuple
 
@@ -44,6 +45,7 @@ class CausalBanditConfig:
     edge_prob: float = 0.3     # probability of an edge between covariates (respecting acyclicity)
     reward_alpha: float = 2.0  # parameters of Beta prior for reward Bernoulli means
     reward_beta: float = 2.0
+    reward_logit_scale: float = 1.0  # temperature for Bernoulli logits (controls variance)
     scm_mode: str = "beta_dirichlet"  # sampling style for conditional probability tables
     parent_effect: float = 1.0        # reference-mode mixing between base and parent-specific CPDs
     seed: Optional[int] = None
@@ -61,6 +63,8 @@ class CausalBanditConfig:
             raise ValueError("edge_prob must be in [0, 1]")
         if self.reward_alpha <= 0 or self.reward_beta <= 0:
             raise ValueError("reward_alpha and reward_beta must be positive")
+        if self.reward_logit_scale <= 0:
+            raise ValueError("reward_logit_scale must be positive")
         if self.scm_mode not in SCM_MODES:
             raise ValueError(f"scm_mode must be one of {SCM_MODES}, got {self.scm_mode!r}")
         if not (0.0 <= self.parent_effect <= 1.0):
@@ -201,6 +205,34 @@ def _sample_reward_cpt(
     return table
 
 
+_LOGIT_EPS = 1e-9
+
+
+def _scale_probability(prob: float, *, logit_scale: float) -> float:
+    """Apply a multiplicative scale to the Bernoulli logit to tune variance."""
+
+    if math.isclose(logit_scale, 1.0):
+        return float(prob)
+    clipped = float(np.clip(prob, _LOGIT_EPS, 1.0 - _LOGIT_EPS))
+    logit = math.log(clipped / (1.0 - clipped))
+    scaled_logit = logit * logit_scale
+    return 1.0 / (1.0 + math.exp(-scaled_logit))
+
+
+def _apply_reward_logit_scale(
+    reward_table: Dict[Assignment, np.ndarray],
+    *,
+    logit_scale: float,
+) -> Dict[Assignment, np.ndarray]:
+    if math.isclose(logit_scale, 1.0):
+        return reward_table
+    scaled: Dict[Assignment, np.ndarray] = {}
+    for assignment, probs in reward_table.items():
+        p1 = _scale_probability(float(probs[1]), logit_scale=logit_scale)
+        scaled[assignment] = np.array([1.0 - p1, p1], dtype=float)
+    return scaled
+
+
 def build_random_scm(config: CausalBanditConfig, *, rng: Optional[np.random.Generator] = None) -> CausalBanditInstance:
     """Construct a random SCM consistent with ``config``."""
 
@@ -230,6 +262,7 @@ def build_random_scm(config: CausalBanditConfig, *, rng: Optional[np.random.Gene
         config.reward_beta if config.scm_mode != "reference" else 1.0,
         mode=config.scm_mode,
     )
+    reward_table = _apply_reward_logit_scale(reward_table, logit_scale=config.reward_logit_scale)
 
     def make_node_fn(name: NodeName, parent_names: Sequence[NodeName], table: Dict[Assignment, np.ndarray], domain: int):
         parent_tuple = tuple(parent_names)

@@ -58,6 +58,12 @@ heatmaps under the specified output directory (e.g.,
 value, scheduler, tau, and metrics, so downstream tools can consume the file
 directly.
 
+To probe reward noise, you can either set `--reward-logit-scale <value>` for a
+single configuration or sweep it via `--vary arm_variance`. The underlying knob
+rescales Bernoulli logits before sampling rewards: values below 1 push arm
+means toward 0.5 (higher variance), while values above 1 make the arms sharper
+and reduce variance.
+
 ### Regret-curve driver
 
 Use the reduced driver to focus on classical cumulative regret curves for a
