@@ -236,6 +236,13 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Override the default parent counts when --vary parent_count is used.",
     )
+    parser.add_argument(
+        "--graph-grid",
+        type=float,
+        nargs="+",
+        default=None,
+        help="Override the default edge probabilities when --vary graph_density is used.",
+    )
     parser.add_argument("--n", type=int, default=50)
     parser.add_argument("--ell", type=int, default=2)
     parser.add_argument("--k", type=int, default=2)
@@ -407,6 +414,8 @@ def main() -> None:
     )
     if args.vary == "parent_count" and args.parent_grid:
         knob_values = [int(value) for value in args.parent_grid]
+    elif args.vary == "graph_density" and args.graph_grid:
+        knob_values = [float(value) for value in args.graph_grid]
     else:
         knob_values = grid_values(args.vary, n=args.n, k=args.k)
     results: List[Dict[str, Any]] = []
