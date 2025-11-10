@@ -42,6 +42,7 @@ from .sampler_cache import SamplerCache
 
 KNOB_LABELS = {
     "graph_density": ("Graph Density", "graph densities"),
+    "node_count": ("Node Count", "node counts"),
     "parent_count": ("Parent Count", "parent counts"),
     "intervention_size": ("Intervention Size", "intervention sizes"),
     "alphabet": ("Alphabet Size", "alphabet sizes"),
@@ -359,7 +360,15 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Tau-scheduled causal bandit study.")
     parser.add_argument(
         "--vary",
-        choices=["graph_density", "parent_count", "intervention_size", "alphabet", "horizon", "arm_variance"],
+        choices=[
+            "graph_density",
+            "node_count",
+            "parent_count",
+            "intervention_size",
+            "alphabet",
+            "horizon",
+            "arm_variance",
+        ],
         required=True,
         help="Environment knob to sweep.",
     )
@@ -376,6 +385,13 @@ def parse_args() -> argparse.Namespace:
         nargs="+",
         default=None,
         help="Override the default edge probabilities when --vary graph_density is used.",
+    )
+    parser.add_argument(
+        "--node-grid",
+        type=int,
+        nargs="+",
+        default=None,
+        help="Override the default node counts when --vary node_count is used.",
     )
     parser.add_argument("--n", type=int, default=50)
     parser.add_argument("--ell", type=int, default=2)
@@ -571,6 +587,8 @@ def main() -> None:
         knob_values = [int(value) for value in args.parent_grid]
     elif args.vary == "graph_density" and args.graph_grid:
         knob_values = [float(value) for value in args.graph_grid]
+    elif args.vary == "node_count" and args.node_grid:
+        knob_values = [int(value) for value in args.node_grid]
     else:
         knob_values = grid_values(args.vary, n=args.n, k=args.k)
     results: List[Dict[str, Any]] = []
@@ -618,6 +636,17 @@ def main() -> None:
             cfg = base_cfg
             if args.vary == "graph_density":
                 cfg = dataclasses.replace(cfg, edge_prob=float(knob_value))
+            elif args.vary == "node_count":
+                new_n = int(knob_value)
+                if new_n < cfg.k:
+                    raise ValueError(f"node_count grid value {new_n} must be >= k={cfg.k}")
+                new_m = min(cfg.m, new_n)
+                cfg = dataclasses.replace(
+                    cfg,
+                    n=new_n,
+                    m=new_m,
+                    edge_prob=2.0 / max(1, new_n),
+                )
             elif args.vary == "parent_count":
                 new_k = int(knob_value)
                 cfg = dataclasses.replace(cfg, k=new_k, m=max(new_k, cfg.m))
