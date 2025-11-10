@@ -19,8 +19,13 @@ DEFAULTS = {
     "T": 10_000,
 }
 
+def _graph_density_grid(n: int) -> List[float]:
+    values = [1 / n, 2 / n, 4 / n, np.log(n) / n, (np.log(n) ** 2) / n]
+    return [min(1.0, float(v)) for v in values]
+
+
 GRIDS = {
-    "graph_density": lambda n: [1 / n, 2 / n, 4 / n, np.log(n) / n, (np.log(n) ** 2) / n],
+    "graph_density": _graph_density_grid,
     "parent_count": [1, 2, 4, 8],
     "intervention_size": lambda k, n: [max(1, k // 2), k, min(k + 2, n)],
     "alphabet": [2, 4],
