@@ -245,17 +245,78 @@ def aggregate_heatmap(
     knob_values: Sequence[float],
     metric_key: str,
 ) -> np.ndarray:
-    matrix = np.zeros((len(tau_values), len(knob_values)))
-    counts = np.zeros_like(matrix)
+    sums, _, counts = _accumulate_heatmap_stats(results, tau_values, knob_values, metric_key)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        means = np.divide(sums, counts, out=np.zeros_like(sums), where=counts > 0)
+    return means
+
+
+def aggregate_heatmap_with_std(
+    results: Sequence[Dict[str, Any]],
+    tau_values: Sequence[float],
+    knob_values: Sequence[float],
+    metric_key: str,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    sums, sumsq, counts = _accumulate_heatmap_stats(results, tau_values, knob_values, metric_key)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        means = np.divide(sums, counts, out=np.zeros_like(sums), where=counts > 0)
+        mean_sq = np.divide(sumsq, counts, out=np.zeros_like(sumsq), where=counts > 0)
+    variance = np.maximum(mean_sq - means**2, 0.0)
+    std = np.sqrt(variance)
+    return means, std, counts
+
+
+def _accumulate_heatmap_stats(
+    results: Sequence[Dict[str, Any]],
+    tau_values: Sequence[float],
+    knob_values: Sequence[float],
+    metric_key: str,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    sums = np.zeros((len(tau_values), len(knob_values)), dtype=np.float64)
+    sumsq = np.zeros_like(sums)
+    counts = np.zeros_like(sums)
     tau_index = {tau: idx for idx, tau in enumerate(tau_values)}
     knob_index = {kv: idx for idx, kv in enumerate(knob_values)}
     for record in results:
         t_idx = tau_index[record["tau"]]
         k_idx = knob_index[record["knob_value"]]
-        matrix[t_idx, k_idx] += record[metric_key]
+        value = float(record[metric_key])
+        sums[t_idx, k_idx] += value
+        sumsq[t_idx, k_idx] += value * value
         counts[t_idx, k_idx] += 1
-    counts[counts == 0] = 1
-    return matrix / counts
+    return sums, sumsq, counts
+
+
+def report_heatmap_std(
+    means: np.ndarray,
+    std: np.ndarray,
+    counts: np.ndarray,
+    *,
+    metric_label: str,
+) -> None:
+    mask = counts > 0
+    if not np.any(mask):
+        return
+    avg_std = float(np.mean(std[mask]))
+    max_std = float(np.max(std[mask]))
+    reference = float(np.mean(np.abs(means[mask])))
+    reference = max(reference, 1e-8)
+    avg_ratio = avg_std / reference
+    max_ratio = max_std / reference
+    print(
+        f"[tau-study] {metric_label}: mean std={avg_std:.4g} "
+        f"(avg ratio {avg_ratio:.1%}), max std={max_std:.4g} (ratio {max_ratio:.1%})"
+    )
+    if avg_ratio > 0.10:
+        print(
+            f"[tau-study][warning] Average std for {metric_label} exceeds 10% of the mean "
+            f"(avg std {avg_std:.4g}, reference {reference:.4g})."
+        )
+    if max_ratio > 0.20:
+        print(
+            f"[tau-study][warning] At least one cell has std above 20% of the mean "
+            f"(max std {max_std:.4g}, reference {reference:.4g})."
+        )
 
 
 @dataclasses.dataclass(frozen=True)
@@ -705,13 +766,26 @@ def main() -> None:
             f.write(json.dumps(record) + "\n")
 
     tau_values = args.tau_grid
-    matrix = aggregate_heatmap(results, tau_values, knob_values, args.metric)
+    matrix, std_matrix, counts = aggregate_heatmap_with_std(results, tau_values, knob_values, args.metric)
     graph_success_matrix = aggregate_heatmap(results, tau_values, knob_values, "graph_success")
     overlay_mask = graph_success_matrix >= OVERLAY_SUCCESS_THRESHOLD
     knob_label, knob_label_plural = KNOB_LABELS.get(
         args.vary, (args.vary.replace("_", " ").title(), f"{args.vary.replace('_', ' ')}s")
     )
     metric_label = METRIC_LABELS.get(args.metric, args.metric.replace("_", " ").capitalize())
+    report_heatmap_std(matrix, std_matrix, counts, metric_label=metric_label)
+    std_report_path = args.output_dir / f"heatmap_{args.metric}_std.json"
+    with std_report_path.open("w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "tau_values": list(map(float, tau_values)),
+                "knob_values": list(map(float, knob_values)),
+                "std": std_matrix.tolist(),
+                "mean": matrix.tolist(),
+                "counts": counts.astype(int).tolist(),
+            },
+            f,
+        )
     plot_heatmap(
         matrix,
         tau_values=tau_values,
