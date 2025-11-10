@@ -10,7 +10,7 @@ import math
 from collections import defaultdict
 from itertools import combinations, product
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 from tqdm.auto import tqdm
@@ -101,6 +101,56 @@ def _format_value(value: float) -> str:
     if float(value).is_integer():
         return str(int(value))
     return f"{value:.4g}"
+
+
+def _cast_grid_value(value: float, caster: Callable[[str], Any]) -> Any:
+    if caster is int:
+        return int(round(value))
+    if caster is float:
+        return float(value)
+    return caster(str(value))
+
+
+def _expand_range(token: str, caster: Callable[[str], Any]) -> List[Any]:
+    parts = token.split(":")
+    if len(parts) == 2:
+        start = float(parts[0])
+        stop = float(parts[1])
+        step = 1.0 if stop >= start else -1.0
+    elif len(parts) == 3:
+        start = float(parts[0])
+        step = float(parts[1])
+        stop = float(parts[2])
+        if step == 0:
+            raise ValueError("Range step cannot be zero.")
+    else:
+        raise ValueError(f"Invalid grid range specifier: {token!r}")
+    values: List[Any] = []
+    max_iters = 100_000
+    current = start
+    epsilon = 1e-9
+    for _ in range(max_iters):
+        if step > 0 and current > stop + epsilon:
+            break
+        if step < 0 and current < stop - epsilon:
+            break
+        values.append(_cast_grid_value(current, caster))
+        current += step
+    else:
+        raise ValueError(f"Range specifier {token!r} produced too many values; check the step size.")
+    return values
+
+
+def _parse_grid_tokens(tokens: Optional[Sequence[str]], caster: Callable[[str], Any]) -> Optional[List[Any]]:
+    if tokens is None:
+        return None
+    expanded: List[Any] = []
+    for token in tokens:
+        if ":" in token:
+            expanded.extend(_expand_range(token, caster))
+        else:
+            expanded.append(caster(token))
+    return expanded
 
 
 def adaptive_config_from_args(
@@ -374,24 +424,24 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--parent-grid",
-        type=int,
+        type=str,
         nargs="+",
         default=None,
-        help="Override the default parent counts when --vary parent_count is used.",
+        help="Override parent counts when --vary parent_count is used (accepts start[:step]:stop ranges).",
     )
     parser.add_argument(
         "--graph-grid",
-        type=float,
+        type=str,
         nargs="+",
         default=None,
-        help="Override the default edge probabilities when --vary graph_density is used.",
+        help="Override edge probabilities when --vary graph_density is used (accepts start[:step]:stop ranges).",
     )
     parser.add_argument(
         "--node-grid",
-        type=int,
+        type=str,
         nargs="+",
         default=None,
-        help="Override the default node counts when --vary node_count is used.",
+        help="Override node counts when --vary node_count is used (accepts start[:step]:stop ranges).",
     )
     parser.add_argument("--n", type=int, default=50)
     parser.add_argument("--ell", type=int, default=2)
@@ -570,6 +620,9 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    args.parent_grid = _parse_grid_tokens(args.parent_grid, int)
+    args.graph_grid = _parse_grid_tokens(args.graph_grid, float)
+    args.node_grid = _parse_grid_tokens(args.node_grid, int)
     seed_start, seed_end = map(int, args.seeds.split(":"))
     seeds = list(range(seed_start, seed_end + 1))
     m_value = args.m if args.m is not None else args.k
