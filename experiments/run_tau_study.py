@@ -54,6 +54,8 @@ METRIC_LABELS = {
     "tto": "Time to optimality",
 }
 
+OVERLAY_SUCCESS_THRESHOLD = 0.5
+
 
 @dataclasses.dataclass(frozen=True)
 class SamplingSettings:
@@ -188,6 +190,12 @@ def run_trial(
     )
     summary = scheduler.run(rng)
     metrics = summarize(summary.logs, optimal_mean)
+    true_parent_set = tuple(sorted(instance.parent_indices()))
+    found_parent_set = tuple(sorted(summary.final_parent_set))
+    intersection = set(true_parent_set) & set(found_parent_set)
+    parent_precision = len(intersection) / max(1, len(found_parent_set))
+    parent_recall = len(intersection) / max(1, len(true_parent_set))
+    graph_success = found_parent_set == true_parent_set
     finished_round = summary.finished_discovery_round
     record: Dict[str, Any] = {
         "tau": tau,
@@ -202,6 +210,9 @@ def run_trial(
         "finished_discovery_round": finished_round,
         "horizon": horizon,
         "scheduler": scheduler_mode,
+        "graph_success": graph_success,
+        "parent_precision": parent_precision,
+        "parent_recall": parent_recall,
     }
     return record, summary, optimal_mean
 
@@ -695,6 +706,8 @@ def main() -> None:
 
     tau_values = args.tau_grid
     matrix = aggregate_heatmap(results, tau_values, knob_values, args.metric)
+    graph_success_matrix = aggregate_heatmap(results, tau_values, knob_values, "graph_success")
+    overlay_mask = graph_success_matrix >= OVERLAY_SUCCESS_THRESHOLD
     knob_label, knob_label_plural = KNOB_LABELS.get(
         args.vary, (args.vary.replace("_", " ").title(), f"{args.vary.replace('_', ' ')}s")
     )
@@ -707,6 +720,16 @@ def main() -> None:
         cbar_label=metric_label,
         x_label=knob_label,
         output_path=args.output_dir / f"heatmap_{args.metric}.png",
+    )
+    plot_heatmap(
+        matrix,
+        tau_values=tau_values,
+        knob_values=knob_values,
+        title=f"{metric_label} for varying {knob_label_plural} (structure overlay)",
+        cbar_label=metric_label,
+        x_label=knob_label,
+        output_path=args.output_dir / f"overlayed_heatmap_{args.metric}.png",
+        overlay_mask=overlay_mask,
     )
 
 
