@@ -42,7 +42,7 @@ KNOB_LABELS = {
     "intervention_size": ("Intervention Size", "intervention sizes"),
     "alphabet": ("Alphabet Size", "alphabet sizes"),
     "horizon": ("Horizon", "horizons"),
-    "arm_variance": ("Arm Variance Scale", "arm variance scales"),
+    "arm_variance": ("Reward Logit Scale", "reward logit scales"),
 }
 
 METRIC_LABELS = {

@@ -76,10 +76,10 @@ Additional knobs introduced in this revision:
   experiments with tiny reward gaps can dial up accuracy explicitly.
 
 To probe reward noise, you can either set `--reward-logit-scale <value>` for a
-single configuration or sweep it via `--vary arm_variance`. The underlying knob
-rescales Bernoulli logits before sampling rewards: values below 1 push arm
-means toward 0.5 (higher variance), while values above 1 make the arms sharper
-and reduce variance.
+single configuration or sweep it via `--vary arm_variance`. The plots now
+annotate this axis as “Reward Logit Scale,” which rescales Bernoulli logits
+before sampling rewards: values below 1 push arm means toward 0.5 (higher
+variance), while values above 1 make the arms sharper and reduce variance.
 
 ### Regret-curve driver
 
