@@ -43,12 +43,12 @@ class TrialIdentity:
     seed: int
     knob_value: float
     scheduler: str
-    structure_backend: str = "proxy"
     subset_size: int
     use_full_budget: bool
     effect_threshold: float
     min_samples: int
-    adaptive_config: Optional[Dict[str, Any]]
+    structure_backend: str = "proxy"
+    adaptive_config: Optional[Dict[str, Any]] = None
     hybrid_config: Optional[Dict[str, Any]] = None
     raps_params: Optional[Dict[str, Any]] = None
     structure_mc_samples: int = 512
