@@ -38,7 +38,7 @@ from .exploit import ArmBuilder, HybridArmConfig, ParentAwareUCB
 from .grids import TAU_GRID, grid_values
 from .heatmap import plot_heatmap
 from .metrics import summarize
-from .scheduler import AdaptiveBurstConfig, RunSummary, build_scheduler
+from .scheduler import AdaptiveBurstConfig, RunSummary, RoundLog, build_scheduler
 from .timeline import encode_schedule, plot_time_allocation
 from .structure import RAPSLearner, StructureConfig
 from .sampler_cache import SamplerCache
