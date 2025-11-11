@@ -43,11 +43,14 @@ class TrialIdentity:
     seed: int
     knob_value: float
     scheduler: str
+    structure_backend: str = "proxy"
     subset_size: int
     use_full_budget: bool
     effect_threshold: float
     min_samples: int
     adaptive_config: Optional[Dict[str, Any]]
+    hybrid_config: Optional[Dict[str, Any]] = None
+    raps_params: Optional[Dict[str, Any]] = None
     structure_mc_samples: int = 512
     arm_mc_samples: int = 1024
     optimal_mean_mc_samples: int = 2048
@@ -60,11 +63,14 @@ class TrialIdentity:
             "seed": self.seed,
             "knob_value": self.knob_value,
             "scheduler": self.scheduler,
+            "structure_backend": self.structure_backend,
             "subset_size": self.subset_size,
             "use_full_budget": self.use_full_budget,
             "effect_threshold": self.effect_threshold,
             "min_samples": self.min_samples,
             "adaptive_config": self.adaptive_config,
+            "hybrid_config": self.hybrid_config,
+            "raps_params": self.raps_params,
             "structure_mc_samples": self.structure_mc_samples,
             "arm_mc_samples": self.arm_mc_samples,
             "optimal_mean_mc_samples": self.optimal_mean_mc_samples,
@@ -79,11 +85,14 @@ def make_trial_identity(
     seed: int,
     knob_value: float,
     scheduler: str,
+    structure_backend: str,
     subset_size: int,
     use_full_budget: bool,
     effect_threshold: float,
     min_samples: int,
     adaptive_config: Optional[Dict[str, Any]],
+    hybrid_config: Optional[Dict[str, Any]] = None,
+    raps_params: Optional[Dict[str, Any]] = None,
     structure_mc_samples: int = 512,
     arm_mc_samples: int = 1024,
     optimal_mean_mc_samples: int = 2048,
@@ -95,11 +104,14 @@ def make_trial_identity(
         seed=int(seed),
         knob_value=float(knob_value),
         scheduler=str(scheduler),
+        structure_backend=str(structure_backend),
         subset_size=int(subset_size),
         use_full_budget=bool(use_full_budget),
         effect_threshold=float(effect_threshold),
         min_samples=int(min_samples),
         adaptive_config=_serialize_adaptive_cfg(adaptive_config),
+        hybrid_config=_serialize_adaptive_cfg(hybrid_config),
+        raps_params=_serialize_adaptive_cfg(raps_params),
         structure_mc_samples=int(structure_mc_samples),
         arm_mc_samples=int(arm_mc_samples),
         optimal_mean_mc_samples=int(optimal_mean_mc_samples),

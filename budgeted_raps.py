@@ -537,6 +537,7 @@ class BudgetedRAPSStep:
     action: str
     interventions: List[Assignment]
     rewards: np.ndarray
+    parent_mask: np.ndarray
 
 
 @dataclass
@@ -692,6 +693,7 @@ def run_budgeted_raps(
                 action=algorithm._last_action,
                 interventions=[dict(assignment) for assignment in assignments],
                 rewards=rewards.copy(),
+                parent_mask=algorithm.stats.parents.copy(),
             )
         )
 

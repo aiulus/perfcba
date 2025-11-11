@@ -51,12 +51,29 @@ python -m perfcba.experiments.run_tau_study \
 ```
 
 The CLI sweeps `tau`, generates SCMs via `CausalBanditConfig`, interleaves
-structure learning (`experiments.structure.RAPSLearner`) with exploitation
-(`experiments.exploit.ParentAwareUCB`), records JSONL summaries, and emits
+structure learning with exploitation, records JSONL summaries, and emits
 heatmaps under the specified output directory (e.g.,
 `results/tau_study/graph_density/`). Each JSONL row captures the seed, knob
 value, scheduler, tau, and metrics, so downstream tools can consume the file
 directly.
+
+`--structure-backend` selects which parent learner is wrapped by the schedulers.
+`budgeted_raps` (default) reuses the official `RAPSUCB` implementation via
+`perfcba.budgeted_raps`, while `proxy` keeps the lightweight heuristic learner
+for ablations.  When the budgeted backend is active the CLI also honors
+`--raps-eps`, `--raps-gap`, and `--raps-delta`, mirroring the finite-sample
+constants from the reference code.
+
+Additional knobs introduced in this revision:
+
+- `--hybrid-arms` enables “mixed control” exploitation arms that append
+  high-priority non-parents when fewer than `m` parents are known. Use
+  `--hybrid-max-fillers` / `--hybrid-max-hybrid-arms` to keep the enumeration
+  bounded on large graphs.
+- `--structure-mc-samples`, `--arm-mc-samples`, and
+  `--optimal-mean-mc-samples` bubble up the Monte Carlo budgets that were
+  previously only controllable via the `--small`/`--very-small` presets, so
+  experiments with tiny reward gaps can dial up accuracy explicitly.
 
 To probe reward noise, you can either set `--reward-logit-scale <value>` for a
 single configuration or sweep it via `--vary arm_variance`. The underlying knob

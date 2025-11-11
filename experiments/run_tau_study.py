@@ -10,11 +10,14 @@ import math
 from collections import defaultdict
 from itertools import combinations, product
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, MutableMapping, Optional, Sequence, Tuple, Literal
 
 import numpy as np
 from tqdm.auto import tqdm
 
+from ..SCM import Intervention
+from ..budgeted_raps import BudgetedRAPSResult, run_budgeted_raps
+from ..causal_bandits import RAPSParams
 from .artifacts import (
     TrialArtifact,
     TrialIdentity,
@@ -27,10 +30,11 @@ from .artifacts import (
 from .causal_envs import (
     CausalBanditConfig,
     CausalBanditInstance,
+    InterventionArm,
     InterventionSpace,
     build_random_scm,
 )
-from .exploit import ArmBuilder, ParentAwareUCB
+from .exploit import ArmBuilder, HybridArmConfig, ParentAwareUCB
 from .grids import TAU_GRID, grid_values
 from .heatmap import plot_heatmap
 from .metrics import summarize
@@ -64,6 +68,134 @@ class SamplingSettings:
     structure_mc_samples: int
     arm_mc_samples: int
     optimal_mean_mc_samples: int
+
+
+StructureBackend = Literal["proxy", "budgeted_raps"]
+
+
+class InstancePCM:
+    """Adapter exposing a :class:`CausalBanditInstance` through the PCM interface."""
+
+    def __init__(self, instance: CausalBanditInstance, rng: np.random.Generator) -> None:
+        self.instance = instance
+        self._rng = rng
+        self.V = list(instance.node_names)
+        self.K = int(instance.config.ell)
+        self.reward_node = instance.reward_node
+
+    def _spawn_rng(self) -> np.random.Generator:
+        return np.random.default_rng(int(self._rng.integers(2**32 - 1)))
+
+    def _sample(
+        self,
+        B: int,
+        *,
+        intervention: Optional[Intervention] = None,
+    ) -> List[MutableMapping[str, int]]:
+        if B <= 0:
+            raise ValueError("PCM sampling requires B > 0.")
+        rng = self._spawn_rng()
+        samples: List[MutableMapping[str, int]] = []
+        for _ in range(B):
+            draw = self.instance.scm.sample(rng, intervention=intervention)
+            samples.append({name: int(draw[name]) for name in self.instance.node_names})
+        return samples
+
+    def observe(self, B: int) -> List[MutableMapping[str, int]]:
+        return self._sample(B)
+
+    def intervene(self, do: MutableMapping[str, int], B: int) -> List[MutableMapping[str, int]]:
+        intervention = Intervention(name="do", hard=dict(do))
+        return self._sample(B, intervention=intervention)
+
+
+ArmKey = Tuple[Tuple[int, ...], Tuple[int, ...]]
+
+
+def _arm_from_assignment(
+    assignment: MutableMapping[str, int],
+    node_to_index: Dict[str, int],
+    reward_index: int,
+) -> InterventionArm:
+    if not assignment:
+        return InterventionArm(tuple(), tuple())
+    ordered = sorted(assignment.items(), key=lambda item: node_to_index[item[0]])
+    variables: List[int] = []
+    values: List[int] = []
+    for name, value in ordered:
+        idx = node_to_index[name]
+        if idx == reward_index:
+            continue
+        variables.append(idx)
+        values.append(int(value))
+    return InterventionArm(tuple(variables), tuple(values))
+
+
+def _budgeted_summary_from_trace(
+    result: BudgetedRAPSResult,
+    instance: CausalBanditInstance,
+    sampling: SamplingSettings,
+    rng: np.random.Generator,
+) -> RunSummary:
+    node_to_index = {name: idx for idx, name in enumerate(instance.node_names)}
+    reward_index = node_to_index[instance.reward_node]
+    rng_means = np.random.default_rng(int(rng.integers(2**32 - 1)))
+    mean_cache: Dict[ArmKey, float] = {}
+
+    def mean_for_arm(arm: InterventionArm) -> float:
+        key: ArmKey = (arm.variables, arm.values)
+        if key not in mean_cache:
+            mean_cache[key] = instance.estimate_arm_mean(arm, rng_means, n_mc=sampling.arm_mc_samples)
+        return mean_cache[key]
+
+    logs: List[RoundLog] = []
+    structure_steps = 0
+    exploit_steps = 0
+    finished_round: Optional[int] = None
+    parent_set_snapshot: Tuple[int, ...] = tuple()
+    true_parent_set = tuple(sorted(instance.parent_indices()))
+
+    for idx, step in enumerate(result.trace):
+        assignment = step.interventions[0] if step.interventions else {}
+        arm = _arm_from_assignment(assignment, node_to_index, reward_index)
+        reward = float(np.mean(step.rewards)) if len(step.rewards) else 0.0
+        expected = mean_for_arm(arm)
+        parent_mask = step.parent_mask
+        if parent_mask.ndim == 2:
+            parent_vector = parent_mask[0]
+        else:
+            parent_vector = parent_mask
+        parents = tuple(
+            sorted(i for i, flag in enumerate(parent_vector) if flag and i != reward_index)
+        )
+        parent_set_snapshot = parents
+        action = step.action
+        mode = "exploit" if action == "exploit" else "structure"
+        if action == "exploit":
+            exploit_steps += 1
+        else:
+            structure_steps += 1
+        if finished_round is None and parents == true_parent_set:
+            finished_round = idx + 1
+        logs.append(
+            RoundLog(
+                t=idx + 1,
+                mode=mode,
+                arm=arm,
+                reward=reward,
+                expected_mean=expected,
+                parent_set=parents,
+                arm_count=0,
+            )
+        )
+
+    return RunSummary(
+        logs=logs,
+        structure_steps=structure_steps,
+        exploit_steps=exploit_steps,
+        final_parent_set=parent_set_snapshot,
+        finished_discovery_round=finished_round,
+    )
 
 
 def subset_size_for_known_k(cfg: CausalBanditConfig, horizon: int) -> int:
@@ -196,6 +328,9 @@ def run_trial(
     effect_threshold: float,
     sampling: SamplingSettings,
     adaptive_config: Optional[AdaptiveBurstConfig],
+    structure_backend: StructureBackend,
+    raps_params: Optional[RAPSParams],
+    arm_builder_cfg: Optional[HybridArmConfig] = None,
     prepared: Optional[PreparedInstance] = None,
 ) -> Tuple[Dict[str, Any], RunSummary, float]:
     if prepared is not None:
@@ -206,40 +341,55 @@ def run_trial(
     else:
         rng = np.random.default_rng(seed)
         instance = build_random_scm(base_cfg, rng=rng)
-        optimal_mean = compute_optimal_mean(instance, rng)
-    space = InterventionSpace(
-        instance.config.n,
-        instance.config.ell,
-        instance.config.m,
-        include_lower=False,
-    )
-    structure = RAPSLearner(
-        instance,
-        StructureConfig(
-            effect_threshold=effect_threshold,
-            min_samples_per_value=sampling.min_samples,
-            mean_mc_samples=sampling.structure_mc_samples,
-        ),
-    )
-    policy = ParentAwareUCB()
-    arm_builder = ArmBuilder(
-        instance,
-        space,
-        subset_size=subset_size,
-        mc_samples=sampling.arm_mc_samples,
-    )
-    scheduler = build_scheduler(
-        mode=scheduler_mode,  # type: ignore[arg-type]
-        instance=instance,
-        structure=structure,
-        arm_builder=arm_builder,
-        policy=policy,
-        tau=tau,
-        horizon=horizon,
-        use_full_budget=use_full_budget,
-        adaptive_config=adaptive_config,
-    )
-    summary = scheduler.run(rng)
+        optimal_mean = compute_optimal_mean(instance, rng, mc_samples=sampling.optimal_mean_mc_samples)
+    if structure_backend == "budgeted_raps":
+        if raps_params is None:
+            raise ValueError("RAPS parameters must be provided when using the budgeted backend.")
+        pcm = InstancePCM(instance, rng)
+        np.random.seed(int(rng.integers(2**32 - 1)))
+        result = run_budgeted_raps(
+            pcm,
+            params=raps_params,
+            horizon=horizon,
+            tau=tau,
+            batch_size=1,
+        )
+        summary = _budgeted_summary_from_trace(result, instance, sampling, rng)
+    else:
+        space = InterventionSpace(
+            instance.config.n,
+            instance.config.ell,
+            instance.config.m,
+            include_lower=False,
+        )
+        structure = RAPSLearner(
+            instance,
+            StructureConfig(
+                effect_threshold=effect_threshold,
+                min_samples_per_value=sampling.min_samples,
+                mean_mc_samples=sampling.structure_mc_samples,
+            ),
+        )
+        policy = ParentAwareUCB()
+        arm_builder = ArmBuilder(
+            instance,
+            space,
+            subset_size=subset_size,
+            mc_samples=sampling.arm_mc_samples,
+            hybrid_config=arm_builder_cfg,
+        )
+        scheduler = build_scheduler(
+            mode=scheduler_mode,  # type: ignore[arg-type]
+            instance=instance,
+            structure=structure,
+            arm_builder=arm_builder,
+            policy=policy,
+            tau=tau,
+            horizon=horizon,
+            use_full_budget=use_full_budget,
+            adaptive_config=adaptive_config,
+        )
+        summary = scheduler.run(rng)
     metrics = summarize(summary.logs, optimal_mean)
     true_parent_set = tuple(sorted(instance.parent_indices()))
     found_parent_set = tuple(sorted(summary.final_parent_set))
@@ -260,7 +410,8 @@ def run_trial(
         "finished_discovery": finished_round is not None,
         "finished_discovery_round": finished_round,
         "horizon": horizon,
-        "scheduler": scheduler_mode,
+        "scheduler": "budgeted_raps" if structure_backend == "budgeted_raps" else scheduler_mode,
+        "structure_backend": structure_backend,
         "graph_success": graph_success,
         "parent_precision": parent_precision,
         "parent_recall": parent_recall,
@@ -284,6 +435,7 @@ def enrich_record_with_metadata(
     enriched["instance_id"] = trial_identity_digest(identity)
     enriched["horizon"] = int(horizon)
     enriched["scheduler"] = str(scheduler)
+    enriched["structure_backend"] = identity.structure_backend
     enriched["tau"] = float(identity.tau)
     enriched["knob_value"] = float(identity.knob_value)
     enriched["seed"] = int(identity.seed)
@@ -474,6 +626,30 @@ def parse_args() -> argparse.Namespace:
         default="two_phase",
     )
     parser.add_argument(
+        "--structure-backend",
+        choices=["proxy", "budgeted_raps"],
+        default="budgeted_raps",
+        help="Selects the structure learner: 'proxy' uses RAPSLearner, 'budgeted_raps' reuses the official implementation.",
+    )
+    parser.add_argument(
+        "--raps-eps",
+        type=float,
+        default=0.05,
+        help="Epsilon parameter for the budgeted RAPS backend.",
+    )
+    parser.add_argument(
+        "--raps-gap",
+        type=float,
+        default=0.05,
+        help="Gap parameter (Δ) for the budgeted RAPS backend.",
+    )
+    parser.add_argument(
+        "--raps-delta",
+        type=float,
+        default=0.05,
+        help="Confidence parameter δ for the budgeted RAPS backend.",
+    )
+    parser.add_argument(
         "--etc-use-full-budget",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -581,7 +757,43 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, default=Path("results/tau_study"))
     parser.add_argument("--effect-threshold", type=float, default=0.05)
     parser.add_argument("--min-samples", type=int, default=20)
+    parser.add_argument(
+        "--structure-mc-samples",
+        type=int,
+        default=512,
+        help="Monte Carlo samples per structure-arm mean estimate.",
+    )
+    parser.add_argument(
+        "--arm-mc-samples",
+        type=int,
+        default=1024,
+        help="Monte Carlo samples per exploitation arm mean estimate.",
+    )
+    parser.add_argument(
+        "--optimal-mean-mc-samples",
+        type=int,
+        default=2048,
+        help="Monte Carlo samples used when computing the optimal mean.",
+    )
     parser.add_argument("--metric", choices=["cumulative_regret", "tto"], default="cumulative_regret")
+    parser.add_argument(
+        "--hybrid-arms",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Augment partial parent sets with hybrid interventions that use remaining arity.",
+    )
+    parser.add_argument(
+        "--hybrid-max-fillers",
+        type=int,
+        default=None,
+        help="Optional cap on filler-variable combinations considered for hybrid arms.",
+    )
+    parser.add_argument(
+        "--hybrid-max-hybrid-arms",
+        type=int,
+        default=None,
+        help="Optional cap on the total number of hybrid intervention assignments per parent set.",
+    )
     parser.add_argument(
         "--persist-trials",
         type=Path,
@@ -626,6 +838,7 @@ def main() -> None:
     seed_start, seed_end = map(int, args.seeds.split(":"))
     seeds = list(range(seed_start, seed_end + 1))
     m_value = args.m if args.m is not None else args.k
+    raps_params = RAPSParams(eps=args.raps_eps, Delta=args.raps_gap, delta=args.raps_delta)
     base_cfg = CausalBanditConfig(
         n=args.n,
         ell=args.ell,
@@ -679,9 +892,9 @@ def main() -> None:
 
     sampling = SamplingSettings(
         min_samples=max(1, int(math.ceil(args.min_samples * sample_scale))),
-        structure_mc_samples=_scaled(512),
-        arm_mc_samples=_scaled(1024),
-        optimal_mean_mc_samples=_scaled(2048),
+        structure_mc_samples=_scaled(args.structure_mc_samples),
+        arm_mc_samples=_scaled(args.arm_mc_samples),
+        optimal_mean_mc_samples=_scaled(args.optimal_mean_mc_samples),
     )
 
     try:
@@ -716,6 +929,11 @@ def main() -> None:
             subset_size = subset_size_for_known_k(cfg, current_horizon)
             adaptive_cfg = adaptive_config_from_args(args, current_horizon)
             adaptive_cfg_dict = dataclasses.asdict(adaptive_cfg) if adaptive_cfg is not None else None
+            arm_builder_cfg = HybridArmConfig(
+                enabled=bool(args.hybrid_arms),
+                max_fillers=args.hybrid_max_fillers,
+                max_hybrid_arms=args.hybrid_max_hybrid_arms,
+            )
 
             for tau in args.tau_grid:
                 for seed in seeds:
@@ -735,11 +953,14 @@ def main() -> None:
                         seed=seed,
                         knob_value=float(knob_value),
                         scheduler=args.scheduler,
+                        structure_backend=args.structure_backend,
                         subset_size=subset_size,
                         use_full_budget=args.etc_use_full_budget,
                         effect_threshold=args.effect_threshold,
                         min_samples=sampling.min_samples,
                         adaptive_config=adaptive_cfg_dict,
+                        hybrid_config=dataclasses.asdict(arm_builder_cfg),
+                        raps_params=dataclasses.asdict(raps_params) if args.structure_backend == "budgeted_raps" else None,
                         structure_mc_samples=sampling.structure_mc_samples,
                         arm_mc_samples=sampling.arm_mc_samples,
                         optimal_mean_mc_samples=sampling.optimal_mean_mc_samples,
@@ -774,15 +995,19 @@ def main() -> None:
                             effect_threshold=args.effect_threshold,
                             sampling=sampling,
                             adaptive_config=adaptive_cfg,
+                            structure_backend=args.structure_backend,
+                            raps_params=raps_params if args.structure_backend == "budgeted_raps" else None,
+                            arm_builder_cfg=arm_builder_cfg,
                             prepared=prepared_instance,
                         )
 
+                    scheduler_label = args.scheduler if args.structure_backend == "proxy" else "budgeted_raps"
                     record = enrich_record_with_metadata(
                         record,
                         summary=summary,
                         identity=identity,
                         horizon=current_horizon,
-                        scheduler=args.scheduler,
+                        scheduler=scheduler_label,
                     )
 
                     if persist_dir is not None and ran_trial:
