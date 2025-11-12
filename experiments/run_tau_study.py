@@ -40,7 +40,7 @@ from .heatmap import plot_heatmap
 from .metrics import summarize
 from .scheduler import AdaptiveBurstConfig, RunSummary, RoundLog, build_scheduler
 from .timeline import encode_schedule, plot_time_allocation
-from .structure import RAPSLearner, StructureConfig
+from .structure import RAPSLearner, StructureConfig, compute_effect_threshold
 from .sampler_cache import SamplerCache
 
 
@@ -755,7 +755,30 @@ def parse_args() -> argparse.Namespace:
         help="Max columns to plot in time allocation diagrams (longer horizons are downsampled).",
     )
     parser.add_argument("--output-dir", type=Path, default=Path("results/tau_study"))
-    parser.add_argument("--effect-threshold", type=float, default=0.05)
+    parser.add_argument(
+        "--effect-threshold",
+        type=float,
+        default=None,
+        help="Fixed threshold (requires --effect-threshold-mode=fixed).",
+    )
+    parser.add_argument(
+        "--effect-threshold-mode",
+        choices=["scale", "hoeffding", "fixed"],
+        default="scale",
+        help="How to set the structure effect threshold (default: scale-based).",
+    )
+    parser.add_argument(
+        "--effect-threshold-scale",
+        type=float,
+        default=0.75,
+        help="c in c * sqrt(1/min_samples) when mode=scale.",
+    )
+    parser.add_argument(
+        "--effect-threshold-alpha",
+        type=float,
+        default=0.05,
+        help="α in sqrt(0.5 * ln(2/α) / min_samples) when mode=hoeffding.",
+    )
     parser.add_argument("--min-samples", type=int, default=20)
     parser.add_argument(
         "--structure-mc-samples",
@@ -832,6 +855,8 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    if args.effect_threshold is not None and args.effect_threshold_mode != "fixed":
+        raise ValueError("--effect-threshold requires --effect-threshold-mode=fixed.")
     args.parent_grid = _parse_grid_tokens(args.parent_grid, int)
     args.graph_grid = _parse_grid_tokens(args.graph_grid, float)
     args.node_grid = _parse_grid_tokens(args.node_grid, int)
@@ -896,6 +921,13 @@ def main() -> None:
         arm_mc_samples=_scaled(args.arm_mc_samples),
         optimal_mean_mc_samples=_scaled(args.optimal_mean_mc_samples),
     )
+    effect_threshold_value = compute_effect_threshold(
+        min_samples_per_value=sampling.min_samples,
+        mode=args.effect_threshold_mode,
+        fixed_value=args.effect_threshold,
+        scale=args.effect_threshold_scale,
+        hoeffding_alpha=args.effect_threshold_alpha,
+    )
 
     try:
         for knob_value in knob_values:
@@ -956,7 +988,7 @@ def main() -> None:
                         structure_backend=args.structure_backend,
                         subset_size=subset_size,
                         use_full_budget=args.etc_use_full_budget,
-                        effect_threshold=args.effect_threshold,
+                        effect_threshold=effect_threshold_value,
                         min_samples=sampling.min_samples,
                         adaptive_config=adaptive_cfg_dict,
                         hybrid_config=dataclasses.asdict(arm_builder_cfg),
@@ -992,7 +1024,7 @@ def main() -> None:
                             subset_size=subset_size,
                             scheduler_mode=args.scheduler,
                             use_full_budget=args.etc_use_full_budget,
-                            effect_threshold=args.effect_threshold,
+                            effect_threshold=effect_threshold_value,
                             sampling=sampling,
                             adaptive_config=adaptive_cfg,
                             structure_backend=args.structure_backend,

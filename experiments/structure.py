@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Literal, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -18,6 +19,43 @@ class StructureConfig:
     min_samples_per_value: int = 20
     max_steps: Optional[int] = None
     mean_mc_samples: int = 512
+
+
+EffectThresholdMode = Literal["fixed", "scale", "hoeffding"]
+
+
+def compute_effect_threshold(
+    *,
+    min_samples_per_value: int,
+    mode: EffectThresholdMode,
+    fixed_value: Optional[float],
+    scale: float,
+    hoeffding_alpha: float,
+) -> float:
+    """
+    Resolve the decision threshold used by :class:`RAPSLearner`.
+
+    ``scale`` implements the heuristic c * sqrt(1 / n). ``hoeffding`` applies the
+    bound sqrt(0.5 * ln(2 / alpha) / n). ``fixed`` requires ``fixed_value``.
+    """
+
+    if min_samples_per_value <= 0:
+        raise ValueError("min_samples_per_value must be positive.")
+    if mode == "fixed":
+        if fixed_value is None:
+            raise ValueError("fixed_value must be provided when mode='fixed'.")
+        if fixed_value <= 0:
+            raise ValueError("effect_threshold must be strictly positive.")
+        return float(fixed_value)
+    if mode == "scale":
+        if scale <= 0:
+            raise ValueError("effect-threshold scale must be positive.")
+        return float(scale) * math.sqrt(1.0 / float(min_samples_per_value))
+    if mode == "hoeffding":
+        if not 0.0 < hoeffding_alpha < 1.0:
+            raise ValueError("hoeffding alpha must lie in (0, 1).")
+        return math.sqrt(0.5 * math.log(2.0 / hoeffding_alpha) / float(min_samples_per_value))
+    raise ValueError(f"Unknown effect threshold mode: {mode}")
 
 
 @dataclass

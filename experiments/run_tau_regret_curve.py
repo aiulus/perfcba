@@ -25,6 +25,7 @@ from .run_tau_study import (
     SamplingSettings,
     subset_size_for_known_k,
 )
+from .structure import compute_effect_threshold
 
 
 def parse_args() -> argparse.Namespace:
@@ -65,8 +66,26 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--effect-threshold",
         type=float,
+        default=None,
+        help="Fixed effect threshold (requires --effect-threshold-mode=fixed).",
+    )
+    parser.add_argument(
+        "--effect-threshold-mode",
+        choices=["scale", "hoeffding", "fixed"],
+        default="scale",
+        help="How to set the structure effect threshold (default: scale-based).",
+    )
+    parser.add_argument(
+        "--effect-threshold-scale",
+        type=float,
+        default=0.75,
+        help="c in c * sqrt(1/min_samples) when mode=scale.",
+    )
+    parser.add_argument(
+        "--effect-threshold-alpha",
+        type=float,
         default=0.05,
-        help="Structure learner effect threshold.",
+        help="α in sqrt(0.5 * ln(2/α) / min_samples) when mode=hoeffding.",
     )
     parser.add_argument("--min-samples", type=int, default=20, help="Structure learner samples per value.")
     parser.add_argument(
@@ -248,6 +267,8 @@ def load_artifacts_for_seeds(
 
 def main() -> None:
     args = parse_args()
+    if args.effect_threshold is not None and args.effect_threshold_mode != "fixed":
+        raise ValueError("--effect-threshold requires --effect-threshold-mode=fixed.")
     seed_start, seed_end = map(int, args.seeds.split(":"))
     seeds = list(range(seed_start, seed_end + 1))
     if not seeds:
@@ -288,6 +309,13 @@ def main() -> None:
         arm_mc_samples=_scaled(1024),
         optimal_mean_mc_samples=_scaled(2048),
     )
+    effect_threshold_value = compute_effect_threshold(
+        min_samples_per_value=sampling.min_samples,
+        mode=args.effect_threshold_mode,
+        fixed_value=args.effect_threshold,
+        scale=args.effect_threshold_scale,
+        hoeffding_alpha=args.effect_threshold_alpha,
+    )
 
     if not args.plot_only:
         ensure_artifacts(
@@ -299,7 +327,7 @@ def main() -> None:
             subset_size=subset_size,
             scheduler=args.scheduler,
             use_full_budget=args.etc_use_full_budget,
-            effect_threshold=args.effect_threshold,
+            effect_threshold=effect_threshold_value,
             sampling=sampling,
             adaptive_cfg=adaptive_cfg,
             adaptive_cfg_dict=adaptive_cfg_dict,
@@ -316,7 +344,7 @@ def main() -> None:
         subset_size=subset_size,
         scheduler=args.scheduler,
         use_full_budget=args.etc_use_full_budget,
-        effect_threshold=args.effect_threshold,
+        effect_threshold=effect_threshold_value,
         sampling=sampling,
         adaptive_cfg_dict=adaptive_cfg_dict,
         artifact_dir=args.artifact_dir,

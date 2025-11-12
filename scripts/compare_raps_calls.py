@@ -34,7 +34,7 @@ from typing import Any, Dict, Iterable, List, MutableMapping, Optional, Sequence
 import numpy as np
 
 from ..experiments.causal_envs import CausalBanditConfig, build_random_scm
-from ..experiments.structure import RAPSLearner, StructureConfig
+from ..experiments.structure import RAPSLearner, StructureConfig, compute_effect_threshold
 
 
 @dataclass
@@ -282,7 +282,30 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Hard cap on structure calls (overrides tau*horizon when provided).",
     )
-    parser.add_argument("--effect-threshold", type=float, default=0.05, help="StructureConfig.effect_threshold.")
+    parser.add_argument(
+        "--effect-threshold",
+        type=float,
+        default=None,
+        help="Fixed effect threshold (requires --effect-threshold-mode=fixed).",
+    )
+    parser.add_argument(
+        "--effect-threshold-mode",
+        choices=["scale", "hoeffding", "fixed"],
+        default="scale",
+        help="How to set StructureConfig.effect_threshold (default: scale-based).",
+    )
+    parser.add_argument(
+        "--effect-threshold-scale",
+        type=float,
+        default=0.75,
+        help="c in c * sqrt(1/min_samples) when mode=scale.",
+    )
+    parser.add_argument(
+        "--effect-threshold-alpha",
+        type=float,
+        default=0.05,
+        help="α in sqrt(0.5 * ln(2/α) / min_samples) when mode=hoeffding.",
+    )
     parser.add_argument("--min-samples", type=int, default=20, help="StructureConfig.min_samples_per_value.")
 
     parser.add_argument(
@@ -318,6 +341,8 @@ def main() -> None:
         raise ValueError("--tau must be within [0, 1]")
     if args.structure_steps is not None and args.structure_steps < 0:
         raise ValueError("--structure-steps must be non-negative when provided")
+    if args.effect_threshold is not None and args.effect_threshold_mode != "fixed":
+        raise ValueError("--effect-threshold requires --effect-threshold-mode=fixed.")
 
     cap = args.structure_steps
     if cap is None:
@@ -336,7 +361,14 @@ def main() -> None:
         parent_effect=args.parent_effect,
         seed=args.seed,
     )
-    structure_cfg = StructureConfig(effect_threshold=args.effect_threshold, min_samples_per_value=args.min_samples)
+    effect_threshold_value = compute_effect_threshold(
+        min_samples_per_value=args.min_samples,
+        mode=args.effect_threshold_mode,
+        fixed_value=args.effect_threshold,
+        scale=args.effect_threshold_scale,
+        hoeffding_alpha=args.effect_threshold_alpha,
+    )
+    structure_cfg = StructureConfig(effect_threshold=effect_threshold_value, min_samples_per_value=args.min_samples)
 
     output_root = _timestamped_output_dir(args.output_dir)
     ours_path = output_root / "ours_calls.jsonl"

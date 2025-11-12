@@ -25,7 +25,7 @@ from .exploit import ArmBuilder, ParentAwareUCB
 from .grids import grid_values
 from .metrics import summarize
 from .scheduler import RoundLog, RunSummary
-from .structure import RAPSLearner, StructureConfig
+from .structure import RAPSLearner, StructureConfig, compute_effect_threshold
 from .timeline import encode_schedule, plot_time_allocation
 from .run_tau_study import (
     SamplingSettings,
@@ -502,7 +502,30 @@ def parse_args() -> argparse.Namespace:
         default=1.25,
         help="Inflation factor on the theoretical discovery cost.",
     )
-    parser.add_argument("--effect-threshold", type=float, default=0.05)
+    parser.add_argument(
+        "--effect-threshold",
+        type=float,
+        default=None,
+        help="Fixed effect threshold (requires --effect-threshold-mode=fixed).",
+    )
+    parser.add_argument(
+        "--effect-threshold-mode",
+        choices=["scale", "hoeffding", "fixed"],
+        default="scale",
+        help="How to set the structure effect threshold (default: scale-based).",
+    )
+    parser.add_argument(
+        "--effect-threshold-scale",
+        type=float,
+        default=0.75,
+        help="c in c * sqrt(1/min_samples) when mode=scale.",
+    )
+    parser.add_argument(
+        "--effect-threshold-alpha",
+        type=float,
+        default=0.05,
+        help="α in sqrt(0.5 * ln(2/α) / min_samples) when mode=hoeffding.",
+    )
     parser.add_argument("--min-samples", type=int, default=20)
     parser.add_argument(
         "--sampler-cache",
@@ -539,6 +562,8 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    if args.effect_threshold is not None and args.effect_threshold_mode != "fixed":
+        raise ValueError("--effect-threshold requires --effect-threshold-mode=fixed.")
     seed_start, seed_end = map(int, args.seeds.split(":"))
     seeds = list(range(seed_start, seed_end + 1))
     m_value = args.m if args.m is not None else args.k
@@ -589,6 +614,13 @@ def main() -> None:
         structure_mc_samples=_scaled(512),
         arm_mc_samples=_scaled(1024),
         optimal_mean_mc_samples=_scaled(2048),
+    )
+    effect_threshold_value = compute_effect_threshold(
+        min_samples_per_value=sampling.min_samples,
+        mode=args.effect_threshold_mode,
+        fixed_value=args.effect_threshold,
+        scale=args.effect_threshold_scale,
+        hoeffding_alpha=args.effect_threshold_alpha,
     )
 
     results: List[Dict[str, Any]] = []
@@ -652,7 +684,7 @@ def main() -> None:
                         seed=seed,
                         knob_value=float(knob_value),
                         subset_size=subset_size,
-                        effect_threshold=args.effect_threshold,
+                        effect_threshold=effect_threshold_value,
                         sampling=sampling,
                         decision_rule=rule,
                         prepared=prepared_instance,
