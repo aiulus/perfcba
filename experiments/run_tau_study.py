@@ -52,6 +52,8 @@ KNOB_LABELS = {
     "alphabet": ("Alphabet Size", "alphabet sizes"),
     "horizon": ("Horizon", "horizons"),
     "arm_variance": ("Reward Logit Scale", "reward logit scales"),
+    "raps_eps": ("Ancestral Gap ε", "ancestral gaps"),
+    "raps_reward_delta": ("Reward Gap Δ", "reward gaps"),
 }
 
 METRIC_LABELS = {
@@ -416,6 +418,10 @@ def run_trial(
         "parent_precision": parent_precision,
         "parent_recall": parent_recall,
     }
+    if structure_backend == "budgeted_raps" and raps_params is not None:
+        record["raps_eps"] = raps_params.eps
+        record["raps_reward_delta"] = raps_params.Delta
+        record["raps_delta"] = raps_params.delta
     return record, summary, optimal_mean
 
 
@@ -570,6 +576,8 @@ def parse_args() -> argparse.Namespace:
             "alphabet",
             "horizon",
             "arm_variance",
+            "raps_eps",
+            "raps_reward_delta",
         ],
         required=True,
         help="Environment knob to sweep.",
@@ -594,6 +602,20 @@ def parse_args() -> argparse.Namespace:
         nargs="+",
         default=None,
         help="Override node counts when --vary node_count is used (accepts start[:step]:stop ranges).",
+    )
+    parser.add_argument(
+        "--raps-eps-grid",
+        type=str,
+        nargs="+",
+        default=None,
+        help="Override epsilon (ancestral gap) values when --vary raps_eps is used.",
+    )
+    parser.add_argument(
+        "--raps-reward-delta-grid",
+        type=str,
+        nargs="+",
+        default=None,
+        help="Override reward-gap Δ values when --vary raps_reward_delta is used.",
     )
     parser.add_argument("--n", type=int, default=50)
     parser.add_argument("--ell", type=int, default=2)
@@ -860,10 +882,11 @@ def main() -> None:
     args.parent_grid = _parse_grid_tokens(args.parent_grid, int)
     args.graph_grid = _parse_grid_tokens(args.graph_grid, float)
     args.node_grid = _parse_grid_tokens(args.node_grid, int)
+    args.raps_eps_grid = _parse_grid_tokens(args.raps_eps_grid, float)
+    args.raps_reward_delta_grid = _parse_grid_tokens(args.raps_reward_delta_grid, float)
     seed_start, seed_end = map(int, args.seeds.split(":"))
     seeds = list(range(seed_start, seed_end + 1))
     m_value = args.m if args.m is not None else args.k
-    raps_params = RAPSParams(eps=args.raps_eps, Delta=args.raps_reward_delta, delta=args.raps_delta)
     base_cfg = CausalBanditConfig(
         n=args.n,
         ell=args.ell,
@@ -874,12 +897,18 @@ def main() -> None:
         parent_effect=args.parent_effect,
         reward_logit_scale=args.reward_logit_scale,
     )
+    base_raps_eps = args.raps_eps
+    base_raps_reward_delta = args.raps_reward_delta
     if args.vary == "parent_count" and args.parent_grid:
         knob_values = [int(value) for value in args.parent_grid]
     elif args.vary == "graph_density" and args.graph_grid:
         knob_values = [float(value) for value in args.graph_grid]
     elif args.vary == "node_count" and args.node_grid:
         knob_values = [int(value) for value in args.node_grid]
+    elif args.vary == "raps_eps" and args.raps_eps_grid:
+        knob_values = [float(value) for value in args.raps_eps_grid]
+    elif args.vary == "raps_reward_delta" and args.raps_reward_delta_grid:
+        knob_values = [float(value) for value in args.raps_reward_delta_grid]
     else:
         knob_values = grid_values(args.vary, n=args.n, k=args.k)
     results: List[Dict[str, Any]] = []
@@ -966,6 +995,19 @@ def main() -> None:
                 max_fillers=args.hybrid_max_fillers,
                 max_hybrid_arms=args.hybrid_max_hybrid_arms,
             )
+            current_eps = float(base_raps_eps)
+            current_reward_delta = float(base_raps_reward_delta)
+            if args.vary == "raps_eps":
+                current_eps = float(knob_value)
+            elif args.vary == "raps_reward_delta":
+                current_reward_delta = float(knob_value)
+            raps_params_for_knob: Optional[RAPSParams] = None
+            if args.structure_backend == "budgeted_raps":
+                raps_params_for_knob = RAPSParams(
+                    eps=current_eps,
+                    Delta=current_reward_delta,
+                    delta=args.raps_delta,
+                )
 
             for tau in args.tau_grid:
                 for seed in seeds:
@@ -992,7 +1034,9 @@ def main() -> None:
                         min_samples=sampling.min_samples,
                         adaptive_config=adaptive_cfg_dict,
                         hybrid_config=dataclasses.asdict(arm_builder_cfg),
-                        raps_params=dataclasses.asdict(raps_params) if args.structure_backend == "budgeted_raps" else None,
+                        raps_params=dataclasses.asdict(raps_params_for_knob)
+                        if raps_params_for_knob is not None
+                        else None,
                         structure_mc_samples=sampling.structure_mc_samples,
                         arm_mc_samples=sampling.arm_mc_samples,
                         optimal_mean_mc_samples=sampling.optimal_mean_mc_samples,
@@ -1028,7 +1072,7 @@ def main() -> None:
                             sampling=sampling,
                             adaptive_config=adaptive_cfg,
                             structure_backend=args.structure_backend,
-                            raps_params=raps_params if args.structure_backend == "budgeted_raps" else None,
+                            raps_params=raps_params_for_knob,
                             arm_builder_cfg=arm_builder_cfg,
                             prepared=prepared_instance,
                         )

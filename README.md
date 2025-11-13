@@ -62,7 +62,9 @@ directly.
 `perfcba.budgeted_raps`, while `proxy` keeps the lightweight heuristic learner
 for ablations.  When the budgeted backend is active the CLI also honors
 `--raps-eps`, `--raps-reward-delta`, and `--raps-delta`, mirroring the finite-sample
-constants from the reference code.
+constants from the reference code.  You can sweep those gaps directly via
+`--vary raps_eps` or `--vary raps_reward_delta`, optionally overriding the default
+grids with `--raps-eps-grid` / `--raps-reward-delta-grid`.
 
 Additional knobs introduced in this revision:
 
