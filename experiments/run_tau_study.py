@@ -638,10 +638,10 @@ def parse_args() -> argparse.Namespace:
         help="Epsilon parameter for the budgeted RAPS backend.",
     )
     parser.add_argument(
-        "--raps-gap",
+        "--raps-reward-delta",
         type=float,
         default=0.05,
-        help="Gap parameter (Δ) for the budgeted RAPS backend.",
+        help="Reward-gap parameter (Δ) for the budgeted RAPS backend.",
     )
     parser.add_argument(
         "--raps-delta",
@@ -863,7 +863,7 @@ def main() -> None:
     seed_start, seed_end = map(int, args.seeds.split(":"))
     seeds = list(range(seed_start, seed_end + 1))
     m_value = args.m if args.m is not None else args.k
-    raps_params = RAPSParams(eps=args.raps_eps, Delta=args.raps_gap, delta=args.raps_delta)
+    raps_params = RAPSParams(eps=args.raps_eps, Delta=args.raps_reward_delta, delta=args.raps_delta)
     base_cfg = CausalBanditConfig(
         n=args.n,
         ell=args.ell,

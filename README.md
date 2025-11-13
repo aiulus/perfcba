@@ -61,7 +61,7 @@ directly.
 `budgeted_raps` (default) reuses the official `RAPSUCB` implementation via
 `perfcba.budgeted_raps`, while `proxy` keeps the lightweight heuristic learner
 for ablations.  When the budgeted backend is active the CLI also honors
-`--raps-eps`, `--raps-gap`, and `--raps-delta`, mirroring the finite-sample
+`--raps-eps`, `--raps-reward-delta`, and `--raps-delta`, mirroring the finite-sample
 constants from the reference code.
 
 Additional knobs introduced in this revision:
