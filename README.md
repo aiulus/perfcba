@@ -83,6 +83,8 @@ python -m perfcba.experiments.run_tau_study \
   --output-dir results/tau_study/tau_sweep_fixed_env
 ```
 
+When sweeping `--vary intervention_size`, pass `--intervention-grid <values>` (including optional `start[:step]:stop` ranges) to control the exact `m` settings such as `{1, 2, 3, 4, 5}`.
+
 Switch `--vary raps_eps` or `--vary raps_reward_delta` (with matching grids)
 to study the ancestral/reward-gap knobs at a fixed `tau`. After the sweep,
 turn the JSONL output into a line plot showing cumulative regret, time to

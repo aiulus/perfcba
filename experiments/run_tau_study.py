@@ -609,6 +609,13 @@ def parse_args() -> argparse.Namespace:
         help="Override node counts when --vary node_count is used (accepts start[:step]:stop ranges).",
     )
     parser.add_argument(
+        "--intervention-grid",
+        type=str,
+        nargs="+",
+        default=None,
+        help="Override intervention sizes when --vary intervention_size is used (accepts start[:step]:stop ranges).",
+    )
+    parser.add_argument(
         "--raps-eps-grid",
         type=str,
         nargs="+",
@@ -891,6 +898,7 @@ def main() -> None:
     args.parent_grid = _parse_grid_tokens(args.parent_grid, int)
     args.graph_grid = _parse_grid_tokens(args.graph_grid, float)
     args.node_grid = _parse_grid_tokens(args.node_grid, int)
+    args.intervention_grid = _parse_grid_tokens(args.intervention_grid, int)
     args.raps_eps_grid = _parse_grid_tokens(args.raps_eps_grid, float)
     args.raps_reward_delta_grid = _parse_grid_tokens(args.raps_reward_delta_grid, float)
     seed_start, seed_end = map(int, args.seeds.split(":"))
@@ -914,6 +922,8 @@ def main() -> None:
         knob_values = [float(value) for value in args.graph_grid]
     elif args.vary == "node_count" and args.node_grid:
         knob_values = [int(value) for value in args.node_grid]
+    elif args.vary == "intervention_size" and args.intervention_grid:
+        knob_values = [int(value) for value in args.intervention_grid]
     elif args.vary == "raps_eps" and args.raps_eps_grid:
         knob_values = [float(value) for value in args.raps_eps_grid]
     elif args.vary == "raps_reward_delta" and args.raps_reward_delta_grid:
