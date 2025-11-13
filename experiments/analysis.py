@@ -39,6 +39,12 @@ except Exception:  # pragma: no cover - SciPy may not be installed in CI.
 LOGGER = logging.getLogger(__name__)
 
 KNOWN_METRICS = ("cumulative_regret", "tto", "optimal_rate", "simple_regret")
+METRIC_LABELS = {
+    "cumulative_regret": "Cumulative Regret",
+    "tto": "Time to Optimality",
+    "simple_regret": "Simple Regret",
+    "optimal_rate": "Optimal Action Rate",
+}
 
 @dataclass
 class LoadedResults:
@@ -150,6 +156,81 @@ def aggregate_matrix(
     for count, denom in zip(finished_counts, finished_denoms):
         finished_rates.append(count / denom if denom else math.nan)
     return matrix, per_cell_samples, finished_rates
+
+
+def aggregate_metric_series(
+    records: Sequence[Mapping[str, Any]],
+    knob_values: Sequence[float],
+    metric: str,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    per_knob: Dict[float, List[float]] = defaultdict(list)
+    for record in records:
+        if metric not in record:
+            continue
+        knob = float(record["knob_value"])
+        per_knob[knob].append(float(record[metric]))
+
+    means: List[float] = []
+    stds: List[float] = []
+    counts: List[int] = []
+    for knob in knob_values:
+        samples = per_knob.get(float(knob))
+        if not samples:
+            means.append(math.nan)
+            stds.append(math.nan)
+            counts.append(0)
+            continue
+        arr = np.asarray(samples, dtype=float)
+        means.append(float(np.mean(arr)))
+        stds.append(float(np.std(arr)))
+        counts.append(int(arr.size))
+    return np.asarray(means, dtype=float), np.asarray(stds, dtype=float), np.asarray(counts, dtype=int)
+
+
+def plot_metric_lines(
+    knob_values: Sequence[float],
+    series: Sequence[Tuple[str, np.ndarray, np.ndarray, np.ndarray]],
+    *,
+    x_label: str,
+    output_path: Path,
+) -> None:
+    xs = np.asarray(knob_values, dtype=float)
+    if xs.size == 0:
+        raise ValueError("No knob values available for line plot.")
+    fig, ax = plt.subplots(figsize=(8, 4.5))
+    plotted = False
+    for metric, means, stds, _counts in series:
+        if means.size != xs.size:
+            continue
+        mask = np.isfinite(means)
+        if not mask.any():
+            continue
+        label = METRIC_LABELS.get(metric, metric.replace("_", " ").title())
+        ax.plot(xs[mask], means[mask], marker="o", linewidth=2.0, label=label)
+        if stds.size == means.size:
+            std_vals = stds[mask]
+            if std_vals.size and np.isfinite(std_vals).any():
+                std_vals = np.where(np.isfinite(std_vals), std_vals, 0.0)
+                ax.fill_between(
+                    xs[mask],
+                    means[mask] - std_vals,
+                    means[mask] + std_vals,
+                    alpha=0.15,
+                )
+        plotted = True
+
+    if not plotted:
+        plt.close(fig)
+        raise ValueError("No valid metric series available for plotting.")
+
+    ax.set_xlabel(x_label)
+    ax.set_ylabel("Metric value")
+    ax.grid(True, linestyle="--", alpha=0.3)
+    ax.legend()
+    fig.tight_layout()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=200)
+    plt.close(fig)
 
 
 def _fill_nan_with_column_means(matrix: np.ndarray) -> np.ndarray:
@@ -610,6 +691,12 @@ def parse_args() -> argparse.Namespace:
         help="Metrics to analyze (must match keys in results, or use 'all').",
     )
     parser.add_argument("--out-dir", type=Path, required=True, help="Directory to store plots and reports.")
+    parser.add_argument(
+        "--plot-mode",
+        choices=("heatmap", "line"),
+        default="heatmap",
+        help="Select 'line' to collapse across tau and draw multi-metric line plots versus the swept knob.",
+    )
     parser.add_argument("--sigma", type=float, default=0.5, help="Gaussian smoothing sigma used for gradient visualization.")
     parser.add_argument("--no-smooth", action="store_true", help="Disable smoothing before computing gradient arrows.")
     parser.add_argument("--bootstrap", type=int, default=256, help="Number of bootstrap resamples for gradient CIs.")
@@ -643,6 +730,7 @@ def main() -> None:
             record["g_density"] = g_values[idx]
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
+    line_series: List[Tuple[str, np.ndarray, np.ndarray, np.ndarray]] = []
     for metric in metrics_to_analyze:
         matrix, per_cell_samples, finished_rates = aggregate_matrix(
             loaded.records,
@@ -650,37 +738,46 @@ def main() -> None:
             loaded.knob_values,
             metric,
         )
-        g_coords = g_values if g_values is not None else loaded.knob_values
-        grad_tau, grad_knob, _ = compute_gradients(
-            matrix,
-            loaded.tau_values,
-            g_coords,
-            sigma=args.sigma,
-            smooth_for_plot=not args.no_smooth,
-        )
-        ci = bootstrap_gradients(
-            per_cell_samples,
-            loaded.tau_values,
-            g_coords,
-            sigma=args.sigma,
-            iterations=args.bootstrap,
-            seed=args.bootstrap_seed,
-        )
 
-        heatmap_path = args.out_dir / f"heatmap_{metric}.png"
-        fig, ax = plot_heatmap_with_annotations(
-            matrix,
-            loaded.tau_values,
-            loaded.knob_values,
-            finished_rates=finished_rates,
-            title=f"{metric.replace('_', ' ').title()}",
-            metric_label=metric.replace("_", " ").title(),
-            x_label=args.vary.replace("_", " ").title(),
-            output_path=heatmap_path,
-        )
-        plot_gradient_flow(ax, grad_tau, grad_knob, ci=ci)
-        fig.savefig(args.out_dir / f"flow_{metric}.png")
-        plt.close(fig)
+        if args.plot_mode == "heatmap":
+            g_coords = g_values if g_values is not None else loaded.knob_values
+            grad_tau, grad_knob, _ = compute_gradients(
+                matrix,
+                loaded.tau_values,
+                g_coords,
+                sigma=args.sigma,
+                smooth_for_plot=not args.no_smooth,
+            )
+            ci = bootstrap_gradients(
+                per_cell_samples,
+                loaded.tau_values,
+                g_coords,
+                sigma=args.sigma,
+                iterations=args.bootstrap,
+                seed=args.bootstrap_seed,
+            )
+
+            heatmap_path = args.out_dir / f"heatmap_{metric}.png"
+            fig, ax = plot_heatmap_with_annotations(
+                matrix,
+                loaded.tau_values,
+                loaded.knob_values,
+                finished_rates=finished_rates,
+                title=f"{metric.replace('_', ' ').title()}",
+                metric_label=metric.replace("_", " ").title(),
+                x_label=args.vary.replace("_", " ").title(),
+                output_path=heatmap_path,
+            )
+            plot_gradient_flow(ax, grad_tau, grad_knob, ci=ci)
+            fig.savefig(args.out_dir / f"flow_{metric}.png")
+            plt.close(fig)
+        else:
+            means, stds, counts = aggregate_metric_series(
+                loaded.records,
+                loaded.knob_values,
+                metric,
+            )
+            line_series.append((metric, means, stds, counts))
 
         interaction = test_density_tau_interaction(loaded.records, metric=metric)
         spearman_stats = column_spearman(matrix, loaded.tau_values)
@@ -705,6 +802,17 @@ def main() -> None:
 
         md_content = build_report_markdown(metric, interaction, spearman_stats, slope_stats)
         (args.out_dir / f"tests_{metric}.md").write_text(md_content, encoding="utf-8")
+
+    if args.plot_mode == "line" and line_series:
+        try:
+            plot_metric_lines(
+                loaded.knob_values,
+                line_series,
+                x_label=args.vary.replace("_", " ").title(),
+                output_path=args.out_dir / f"line_{args.vary}.png",
+            )
+        except ValueError as err:
+            LOGGER.warning("Line plot skipped: %s", err)
 
 
 if __name__ == "__main__":  # pragma: no cover - CLI entry point.

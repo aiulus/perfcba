@@ -99,6 +99,11 @@ python -m perfcba.experiments.analysis \
   --out-dir results/tau_study/tau_sweep_fixed_env/analysis
 ```
 
+Line plots collapse the tau/knob grid down to the swept knob and plot all
+requested metrics on shared axes (distinct colors per metric). Omit the flag—or
+pass `--plot-mode heatmap` explicitly—to retain the original heat-map output
+with gradient overlays.
+
 Additional knobs introduced in this revision:
 
 - `--hybrid-arms` enables “mixed control” exploitation arms that append
