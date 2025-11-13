@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Sequence
 
@@ -13,6 +14,7 @@ class AggregateMetrics:
     cumulative_regret: float
     time_to_optimality: int
     optimal_action_rate: float
+    simple_regret: float
 
 
 def cumulative_regret(logs: Sequence[RoundLog], optimal_mean: float) -> float:
@@ -49,9 +51,22 @@ def time_to_optimality(
     return len(logs)
 
 
+def simple_regret(logs: Sequence[RoundLog], optimal_mean: float) -> float:
+    if not logs:
+        return float(optimal_mean)
+    best_played = max(
+        (entry.expected_mean for entry in logs if math.isfinite(entry.expected_mean)),
+        default=float("-inf"),
+    )
+    if best_played == float("-inf"):
+        return float(optimal_mean)
+    return max(0.0, optimal_mean - best_played)
+
+
 def summarize(logs: Sequence[RoundLog], optimal_mean: float) -> AggregateMetrics:
     return AggregateMetrics(
         cumulative_regret=cumulative_regret(logs, optimal_mean),
         time_to_optimality=time_to_optimality(logs, optimal_mean),
         optimal_action_rate=optimal_action_rate(logs, optimal_mean),
+        simple_regret=simple_regret(logs, optimal_mean),
     )

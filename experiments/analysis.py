@@ -38,7 +38,7 @@ except Exception:  # pragma: no cover - SciPy may not be installed in CI.
 
 LOGGER = logging.getLogger(__name__)
 
-KNOWN_METRICS = ("cumulative_regret", "tto", "optimal_rate")
+KNOWN_METRICS = ("cumulative_regret", "tto", "optimal_rate", "simple_regret")
 
 @dataclass
 class LoadedResults:

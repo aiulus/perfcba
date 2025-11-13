@@ -86,13 +86,13 @@ python -m perfcba.experiments.run_tau_study \
 Switch `--vary raps_eps` or `--vary raps_reward_delta` (with matching grids)
 to study the ancestral/reward-gap knobs at a fixed `tau`. After the sweep,
 turn the JSONL output into a line plot showing cumulative regret, time to
-optimality, and optimal-action rate versus the knob:
+optimality, simple regret, and optimal-action rate versus the knob:
 
 ```bash
 python -m perfcba.experiments.analysis \
   --results results/tau_study/tau_sweep_fixed_env/results.jsonl \
   --vary tau \
-  --metrics cumulative_regret tto optimal_rate \
+  --metrics cumulative_regret tto simple_regret optimal_rate \
   --plot-mode line \
   --out-dir results/tau_study/tau_sweep_fixed_env/analysis
 ```
@@ -142,7 +142,7 @@ python -m perfcba.experiments.analysis \
   --results results/tau_study/graph_density/results.jsonl \
   --vary graph_density \
   --n 50 \
-  --metrics cumulative_regret tto \
+  --metrics cumulative_regret tto simple_regret optimal_rate \
   --out-dir results/tau_study/graph_density/analysis
 ```
 

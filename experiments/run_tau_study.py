@@ -54,11 +54,14 @@ KNOB_LABELS = {
     "arm_variance": ("Reward Logit Scale", "reward logit scales"),
     "raps_eps": ("Ancestral Gap ε", "ancestral gaps"),
     "raps_reward_delta": ("Reward Gap Δ", "reward gaps"),
+    "tau": ("Tau Budget", "tau values"),
 }
 
 METRIC_LABELS = {
     "cumulative_regret": "Cumulative regret",
     "tto": "Time to optimality",
+    "simple_regret": "Simple regret",
+    "optimal_rate": "Optimal action rate",
 }
 
 OVERLAY_SUCCESS_THRESHOLD = 0.5
@@ -407,6 +410,7 @@ def run_trial(
         "cumulative_regret": metrics.cumulative_regret,
         "tto": metrics.time_to_optimality,
         "optimal_rate": metrics.optimal_action_rate,
+        "simple_regret": metrics.simple_regret,
         "structure_steps": summary.structure_steps,
         "parents_found": len(summary.final_parent_set),
         "finished_discovery": finished_round is not None,
@@ -578,6 +582,7 @@ def parse_args() -> argparse.Namespace:
             "arm_variance",
             "raps_eps",
             "raps_reward_delta",
+            "tau",
         ],
         required=True,
         help="Environment knob to sweep.",
@@ -820,7 +825,11 @@ def parse_args() -> argparse.Namespace:
         default=2048,
         help="Monte Carlo samples used when computing the optimal mean.",
     )
-    parser.add_argument("--metric", choices=["cumulative_regret", "tto"], default="cumulative_regret")
+    parser.add_argument(
+        "--metric",
+        choices=["cumulative_regret", "tto", "simple_regret", "optimal_rate"],
+        default="cumulative_regret",
+    )
     parser.add_argument(
         "--hybrid-arms",
         action=argparse.BooleanOptionalAction,
@@ -909,10 +918,13 @@ def main() -> None:
         knob_values = [float(value) for value in args.raps_eps_grid]
     elif args.vary == "raps_reward_delta" and args.raps_reward_delta_grid:
         knob_values = [float(value) for value in args.raps_reward_delta_grid]
+    elif args.vary == "tau":
+        knob_values = [float(value) for value in args.tau_grid]
     else:
         knob_values = grid_values(args.vary, n=args.n, k=args.k)
     results: List[Dict[str, Any]] = []
-    total_trials = len(knob_values) * len(args.tau_grid) * len(seeds)
+    tau_loop_len = len(args.tau_grid) if args.vary != "tau" else 1
+    total_trials = len(knob_values) * tau_loop_len * len(seeds)
     progress = tqdm(total=total_trials, desc="Tau study", unit="trial")
     timeline_dir: Optional[Path] = args.timeline_dir
     timeline_store = defaultdict(list) if timeline_dir is not None else None
@@ -1009,7 +1021,8 @@ def main() -> None:
                     delta=args.raps_delta,
                 )
 
-            for tau in args.tau_grid:
+            tau_iter = args.tau_grid if args.vary != "tau" else [float(knob_value)]
+            for tau in tau_iter:
                 for seed in seeds:
                     cache_key = (
                         cfg,
@@ -1148,9 +1161,13 @@ def main() -> None:
         for record in results:
             f.write(json.dumps(record) + "\n")
 
-    tau_values = args.tau_grid
-    matrix, std_matrix, counts = aggregate_heatmap_with_std(results, tau_values, knob_values, args.metric)
-    graph_success_matrix = aggregate_heatmap(results, tau_values, knob_values, "graph_success")
+    tau_values = list(map(float, args.tau_grid))
+    heatmap_results = results
+    if args.vary == "tau":
+        tau_values = [0.0]
+        heatmap_results = [dict(record, tau=0.0) for record in results]
+    matrix, std_matrix, counts = aggregate_heatmap_with_std(heatmap_results, tau_values, knob_values, args.metric)
+    graph_success_matrix = aggregate_heatmap(heatmap_results, tau_values, knob_values, "graph_success")
     overlay_mask = graph_success_matrix >= OVERLAY_SUCCESS_THRESHOLD
     knob_label, knob_label_plural = KNOB_LABELS.get(
         args.vary, (args.vary.replace("_", " ").title(), f"{args.vary.replace('_', ' ')}s")
