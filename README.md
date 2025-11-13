@@ -66,6 +66,37 @@ constants from the reference code.  You can sweep those gaps directly via
 `--vary raps_eps` or `--vary raps_reward_delta`, optionally overriding the default
 grids with `--raps-eps-grid` / `--raps-reward-delta-grid`.
 
+### Single-knob performance curves
+
+For “fixed environment” studies—e.g., hold graph density, alphabet, and reward
+priors constant while sweeping `tau`—run:
+
+```bash
+python -m perfcba.experiments.run_tau_study \
+  --vary tau \
+  --tau-grid 0.0 0.1 0.2 0.4 0.6 0.8 1.0 \
+  --n 50 --ell 2 --k 2 --m 2 --T 10000 \
+  --graph-grid 0.3 --parent-grid 2 --node-grid 50 \
+  --raps-eps 0.05 --raps-reward-delta 0.05 \
+  --seeds 0:19 \
+  --scheduler interleaved \
+  --output-dir results/tau_study/tau_sweep_fixed_env
+```
+
+Switch `--vary raps_eps` or `--vary raps_reward_delta` (with matching grids)
+to study the ancestral/reward-gap knobs at a fixed `tau`. After the sweep,
+turn the JSONL output into a line plot showing cumulative regret, time to
+optimality, and optimal-action rate versus the knob:
+
+```bash
+python -m perfcba.experiments.analysis \
+  --results results/tau_study/tau_sweep_fixed_env/results.jsonl \
+  --vary tau \
+  --metrics cumulative_regret tto optimal_rate \
+  --plot-mode line \
+  --out-dir results/tau_study/tau_sweep_fixed_env/analysis
+```
+
 Additional knobs introduced in this revision:
 
 - `--hybrid-arms` enables “mixed control” exploitation arms that append
