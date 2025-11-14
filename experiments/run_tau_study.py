@@ -54,6 +54,7 @@ KNOB_LABELS = {
     "arm_variance": ("Reward Logit Scale", "reward logit scales"),
     "raps_eps": ("Ancestral Gap ε", "ancestral gaps"),
     "raps_reward_delta": ("Reward Gap Δ", "reward gaps"),
+    "hard_margin": ("Hard Margin", "hard margins"),
     "tau": ("Tau Budget", "tau values"),
 }
 
@@ -65,6 +66,7 @@ METRIC_LABELS = {
 }
 
 OVERLAY_SUCCESS_THRESHOLD = 0.5
+DEFAULT_HARD_MARGIN = 0.1
 
 
 @dataclasses.dataclass(frozen=True)
@@ -421,6 +423,7 @@ def run_trial(
         "graph_success": graph_success,
         "parent_precision": parent_precision,
         "parent_recall": parent_recall,
+        "hard_margin": float(cfg.hard_margin),
     }
     if structure_backend == "budgeted_raps" and raps_params is not None:
         record["raps_eps"] = raps_params.eps
@@ -582,6 +585,7 @@ def parse_args() -> argparse.Namespace:
             "arm_variance",
             "raps_eps",
             "raps_reward_delta",
+            "hard_margin",
             "tau",
         ],
         required=True,
@@ -653,6 +657,14 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--T", type=int, default=10_000)
     parser.add_argument("--tau-grid", type=float, nargs="*", default=TAU_GRID)
+    parser.add_argument(
+        "--hard-margin",
+        nargs="*",
+        type=float,
+        default=None,
+        metavar="M",
+        help="Enable the hard parent-effect margin (TV distance). Provide zero/one/many values; no values use the default 0.1.",
+    )
     parser.add_argument("--seeds", type=str, default="0:9", help="Seed range start:end.")
     parser.add_argument(
         "--scheduler",
@@ -901,6 +913,24 @@ def main() -> None:
     args.intervention_grid = _parse_grid_tokens(args.intervention_grid, int)
     args.raps_eps_grid = _parse_grid_tokens(args.raps_eps_grid, float)
     args.raps_reward_delta_grid = _parse_grid_tokens(args.raps_reward_delta_grid, float)
+    if args.hard_margin is None:
+        hard_margin_values: Optional[List[float]] = None
+    else:
+        if len(args.hard_margin) == 0:
+            hard_margin_values = [DEFAULT_HARD_MARGIN]
+        else:
+            hard_margin_values = [float(value) for value in args.hard_margin]
+    if args.vary == "hard_margin":
+        if hard_margin_values is None:
+            hard_margin_values = [float(value) for value in grid_values("hard_margin", n=args.n, k=args.k)]
+        base_hard_margin = float(hard_margin_values[0]) if hard_margin_values else 0.0
+    else:
+        if hard_margin_values is None:
+            base_hard_margin = 0.0
+        else:
+            if len(hard_margin_values) != 1:
+                raise ValueError("Specify a single --hard-margin value unless --vary hard_margin is active.")
+            base_hard_margin = float(hard_margin_values[0])
     seed_start, seed_end = map(int, args.seeds.split(":"))
     seeds = list(range(seed_start, seed_end + 1))
     m_value = args.m if args.m is not None else args.k
@@ -913,6 +943,7 @@ def main() -> None:
         scm_mode=args.scm_mode,
         parent_effect=args.parent_effect,
         reward_logit_scale=args.reward_logit_scale,
+        hard_margin=base_hard_margin,
     )
     base_raps_eps = args.raps_eps
     base_raps_reward_delta = args.raps_reward_delta
@@ -928,6 +959,10 @@ def main() -> None:
         knob_values = [float(value) for value in args.raps_eps_grid]
     elif args.vary == "raps_reward_delta" and args.raps_reward_delta_grid:
         knob_values = [float(value) for value in args.raps_reward_delta_grid]
+    elif args.vary == "hard_margin":
+        if hard_margin_values is None:
+            raise ValueError("No hard-margin values provided.")
+        knob_values = [float(value) for value in hard_margin_values]
     elif args.vary == "tau":
         knob_values = [float(value) for value in args.tau_grid]
     else:
@@ -1007,6 +1042,8 @@ def main() -> None:
                 pass  # handled via args.T when running trials
             elif args.vary == "arm_variance":
                 cfg = dataclasses.replace(cfg, reward_logit_scale=float(knob_value))
+            elif args.vary == "hard_margin":
+                cfg = dataclasses.replace(cfg, hard_margin=float(knob_value))
 
             current_horizon = args.T if args.vary != "horizon" else int(knob_value)
             subset_size = subset_size_for_known_k(cfg, current_horizon)

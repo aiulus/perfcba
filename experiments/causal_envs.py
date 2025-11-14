@@ -50,6 +50,7 @@ class CausalBanditConfig:
     scm_mode: str = "beta_dirichlet"  # sampling style for conditional probability tables
     parent_effect: float = 1.0        # reference-mode mixing between base and parent-specific CPDs
     seed: Optional[int] = None
+    hard_margin: float = 0.0          # TV distance enforced between parent assignments
 
     def __post_init__(self) -> None:
         if self.n <= 0:
@@ -70,6 +71,8 @@ class CausalBanditConfig:
             raise ValueError(f"scm_mode must be one of {SCM_MODES}, got {self.scm_mode!r}")
         if not (0.0 <= self.parent_effect <= 1.0):
             raise ValueError("parent_effect must be in [0, 1]")
+        if not (0.0 <= self.hard_margin < 1.0):
+            raise ValueError("hard_margin must lie in [0, 1)")
 
     def rng(self) -> np.random.Generator:
         """Return a generator seeded as requested (fresh instance each call)."""
@@ -190,6 +193,36 @@ def _all_assignments(num_parents: int, domain: int) -> Iterable[Assignment]:
     yield from itertools.product(range(domain), repeat=num_parents)
 
 
+_HARD_MARGIN_MAX_ATTEMPTS = 512
+
+
+def _table_tv_distance(a: np.ndarray, b: np.ndarray) -> float:
+    return float(0.5 * np.sum(np.abs(a - b)))
+
+
+def _table_satisfies_margin(table: Dict[Assignment, np.ndarray], margin: float) -> bool:
+    if margin <= 0.0 or len(table) <= 1:
+        return True
+    assignments = list(table.keys())
+    for idx, lhs in enumerate(assignments):
+        probs_l = table[lhs]
+        for rhs in assignments[idx + 1 :]:
+            if _table_tv_distance(probs_l, table[rhs]) + 1e-9 < margin:
+                return False
+    return True
+
+
+def _force_margin_table(table: Dict[Assignment, np.ndarray], ell: int) -> None:
+    if ell <= 1:
+        return
+    assignments = list(table.keys())
+    for idx, assignment in enumerate(assignments):
+        probs = np.zeros(ell, dtype=float)
+        anchor = idx % ell
+        probs[anchor] = 1.0
+        table[assignment] = probs
+
+
 def _sample_covariate_cpt(
     num_parents: int,
     ell: int,
@@ -197,21 +230,25 @@ def _sample_covariate_cpt(
     *,
     mode: str,
     parent_effect: float,
+    hard_margin: float,
 ) -> Dict[Assignment, np.ndarray]:
-    table: Dict[Assignment, np.ndarray] = {}
-    assignments = _all_assignments(num_parents, ell)
-    if mode == "reference":
-        base = rng.dirichlet(np.ones(ell, dtype=float))
-        alpha = np.ones(ell, dtype=float)
-        for assignment in assignments:
-            rnd = rng.dirichlet(alpha)
-            probs = (1.0 - parent_effect) * base + parent_effect * rnd
-            probs = probs / probs.sum()
-            table[assignment] = probs
-        return table
+    assignments = list(_all_assignments(num_parents, ell))
     base_alpha = np.ones(ell, dtype=float)
-    for assignment in assignments:
-        table[assignment] = rng.dirichlet(base_alpha)
+    for _ in range(_HARD_MARGIN_MAX_ATTEMPTS):
+        table: Dict[Assignment, np.ndarray] = {}
+        if mode == "reference":
+            base = rng.dirichlet(np.ones(ell, dtype=float))
+            for assignment in assignments:
+                rnd = rng.dirichlet(base_alpha)
+                probs = (1.0 - parent_effect) * base + parent_effect * rnd
+                probs = probs / probs.sum()
+                table[assignment] = probs
+        else:
+            for assignment in assignments:
+                table[assignment] = rng.dirichlet(base_alpha)
+        if _table_satisfies_margin(table, hard_margin):
+            return table
+    _force_margin_table(table, ell)
     return table
 
 
@@ -223,15 +260,21 @@ def _sample_reward_cpt(
     beta: float,
     *,
     mode: str,
+    hard_margin: float,
 ) -> Dict[Assignment, np.ndarray]:
-    table: Dict[Assignment, np.ndarray] = {}
-    for assignment in _all_assignments(num_parents, ell):
-        if mode == "reference":
-            probs = rng.dirichlet(np.ones(2, dtype=float))
-        else:
-            p = rng.beta(alpha, beta)
-            probs = np.array([1.0 - p, p], dtype=float)
-        table[assignment] = probs
+    assignments = list(_all_assignments(num_parents, ell))
+    for _ in range(_HARD_MARGIN_MAX_ATTEMPTS):
+        table: Dict[Assignment, np.ndarray] = {}
+        for assignment in assignments:
+            if mode == "reference":
+                probs = rng.dirichlet(np.ones(2, dtype=float))
+            else:
+                p = rng.beta(alpha, beta)
+                probs = np.array([1.0 - p, p], dtype=float)
+            table[assignment] = probs
+        if _table_satisfies_margin(table, hard_margin):
+            return table
+    _force_margin_table(table, 2)
     return table
 
 
@@ -291,6 +334,7 @@ def build_random_scm(config: CausalBanditConfig, *, rng: Optional[np.random.Gene
         config.reward_alpha if config.scm_mode != "reference" else 1.0,
         config.reward_beta if config.scm_mode != "reference" else 1.0,
         mode=config.scm_mode,
+        hard_margin=config.hard_margin,
     )
     reward_table = _apply_reward_logit_scale(reward_table, logit_scale=config.reward_logit_scale)
 
@@ -312,6 +356,7 @@ def build_random_scm(config: CausalBanditConfig, *, rng: Optional[np.random.Gene
             rng,
             mode=config.scm_mode,
             parent_effect=config.parent_effect,
+            hard_margin=config.hard_margin,
         )
         structural_functions[node] = make_node_fn(node, par_names, cpt, config.ell)
 

@@ -45,6 +45,7 @@ GRIDS = {
     "arm_variance": [0.5, 0.75, 1.0, 1.5, 2.0],
     "raps_eps": [0.01, 0.02, 0.05, 0.1],
     "raps_reward_delta": [0.01, 0.03, 0.05, 0.1],
+    "hard_margin": [0.0, 0.05, 0.1, 0.2],
     "tau": TAU_GRID,
 }
 
