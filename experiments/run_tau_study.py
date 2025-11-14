@@ -423,7 +423,7 @@ def run_trial(
         "graph_success": graph_success,
         "parent_precision": parent_precision,
         "parent_recall": parent_recall,
-        "hard_margin": float(cfg.hard_margin),
+        "hard_margin": float(instance.config.hard_margin),
     }
     if structure_backend == "budgeted_raps" and raps_params is not None:
         record["raps_eps"] = raps_params.eps
