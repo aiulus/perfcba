@@ -1264,12 +1264,8 @@ def main() -> None:
             f.write(json.dumps(record) + "\n")
 
     tau_values = list(map(float, args.tau_grid))
-    heatmap_results = results
-    if args.vary == "tau":
-        tau_values = [0.0]
-        heatmap_results = [dict(record, tau=0.0) for record in results]
-    matrix, std_matrix, counts = aggregate_heatmap_with_std(heatmap_results, tau_values, knob_values, args.metric)
-    graph_success_matrix = aggregate_heatmap(heatmap_results, tau_values, knob_values, "graph_success")
+    matrix, std_matrix, counts = aggregate_heatmap_with_std(results, tau_values, knob_values, args.metric)
+    graph_success_matrix = aggregate_heatmap(results, tau_values, knob_values, "graph_success")
     overlay_mask = graph_success_matrix >= OVERLAY_SUCCESS_THRESHOLD
     knob_label, knob_label_plural = KNOB_LABELS.get(
         args.vary, (args.vary.replace("_", " ").title(), f"{args.vary.replace('_', ' ')}s")
