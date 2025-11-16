@@ -335,6 +335,108 @@ def plot_lines_by_knob(
     plt.close(fig)
 
 
+def aggregate_env_lines(
+    records: Sequence[Mapping[str, Any]],
+    knob_values: Sequence[float],
+    metric: str,
+    *,
+    env_key: str,
+    tau_filter: Optional[float],
+) -> Dict[float, Tuple[np.ndarray, np.ndarray, np.ndarray]]:
+    """Aggregate mean/std/count for metric vs swept knob, grouped by an environment key."""
+    per_env: Dict[float, Dict[float, List[float]]] = defaultdict(lambda: defaultdict(list))
+    for record in records:
+        if metric not in record or env_key not in record:
+            continue
+        if tau_filter is not None and not math.isclose(float(record["tau"]), float(tau_filter)):
+            continue
+        env_val = float(record[env_key])
+        knob = float(record["knob_value"])
+        per_env[env_val][knob].append(float(record[metric]))
+
+    aggregated: Dict[float, Tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
+    for env_val, buckets in per_env.items():
+        means: List[float] = []
+        stds: List[float] = []
+        counts: List[int] = []
+        for knob in knob_values:
+            samples = buckets.get(float(knob), [])
+            if not samples:
+                means.append(math.nan)
+                stds.append(math.nan)
+                counts.append(0)
+                continue
+            arr = np.asarray(samples, dtype=float)
+            means.append(float(np.mean(arr)))
+            stds.append(float(np.std(arr)))
+            counts.append(int(arr.size))
+        aggregated[env_val] = (np.asarray(means), np.asarray(stds), np.asarray(counts))
+    return aggregated
+
+
+def plot_lines_by_env_knob(
+    knob_values: Sequence[float],
+    env_series: Mapping[float, Tuple[np.ndarray, np.ndarray, np.ndarray]],
+    *,
+    vary: str,
+    env_key: str,
+    output_path: Path,
+    colormap: Optional[str] = None,
+) -> None:
+    xs = np.asarray(knob_values, dtype=float)
+    if xs.size == 0:
+        raise ValueError("No knob values available for line plot.")
+    env_sorted = sorted(env_series.keys())
+    if not env_sorted:
+        raise ValueError("No environment series available for plotting.")
+
+    default_cmaps = {
+        "graph_density": "Greens",
+        "parent_count": "Blues",
+        "arm_variance": "magma",
+        "intervention_size": "Oranges",
+        "node_count": "cividis",
+        "alphabet": "plasma",
+    }
+    cmap_name = colormap or default_cmaps.get(env_key, "viridis")
+    cmap = plt.get_cmap(cmap_name)
+    vmin, vmax = min(env_sorted), max(env_sorted)
+    span = vmax - vmin if vmax != vmin else 1.0
+
+    fig, ax = plt.subplots(figsize=(8, 4.5))
+    for env_val in env_sorted:
+        means, stds, _counts = env_series[env_val]
+        if means.size != xs.size:
+            continue
+        mask = np.isfinite(means)
+        if not mask.any():
+            continue
+        normed = (env_val - vmin) / span
+        color = cmap(normed)
+        label = f"{env_key.replace('_', ' ')}={env_val:g}"
+        ax.plot(xs[mask], means[mask], marker="o", linewidth=1.8, color=color, label=label)
+        if stds.size == means.size:
+            std_vals = stds[mask]
+            if std_vals.size and np.isfinite(std_vals).any():
+                std_vals = np.where(np.isfinite(std_vals), std_vals, 0.0)
+                ax.fill_between(
+                    xs[mask],
+                    means[mask] - std_vals,
+                    means[mask] + std_vals,
+                    alpha=0.12,
+                    color=color,
+                )
+
+    ax.set_xlabel(vary.replace("_", " ").title())
+    ax.set_ylabel("Metric value")
+    ax.grid(True, linestyle="--", alpha=0.3)
+    ax.legend(ncol=2, fontsize="small", title=env_key.replace("_", " ").title())
+    fig.tight_layout()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=200)
+    plt.close(fig)
+
+
 def _fill_nan_with_column_means(matrix: np.ndarray) -> np.ndarray:
     filled = np.array(matrix, copy=True)
     if not np.isnan(filled).any():
@@ -813,6 +915,27 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Matplotlib colormap name for --lines-by-knob; defaults to a preset based on --vary.",
     )
+    parser.add_argument(
+        "--lines-by-env-knob",
+        type=str,
+        default=None,
+        help=(
+            "Draw a family of lines over the swept knob (x-axis = --vary knob) grouped by an environment key "
+            "(e.g., graph_density) for the first requested metric. Requires a single tau or --lines-env-tau."
+        ),
+    )
+    parser.add_argument(
+        "--lines-env-tau",
+        type=float,
+        default=None,
+        help="Tau value to filter when using --lines-by-env-knob; if omitted, requires the results to have a single tau.",
+    )
+    parser.add_argument(
+        "--lines-env-colormap",
+        type=str,
+        default=None,
+        help="Matplotlib colormap name for --lines-by-env-knob; defaults to a preset based on the chosen env key.",
+    )
     parser.add_argument("--sigma", type=float, default=0.5, help="Gaussian smoothing sigma used for gradient visualization.")
     parser.add_argument("--no-smooth", action="store_true", help="Disable smoothing before computing gradient arrows.")
     parser.add_argument("--bootstrap", type=int, default=256, help="Number of bootstrap resamples for gradient CIs.")
@@ -943,6 +1066,34 @@ def main() -> None:
             )
         except ValueError as err:
             LOGGER.warning("lines-by-knob plot skipped: %s", err)
+
+    if args.lines_by_env_knob and metrics_to_analyze:
+        metric = metrics_to_analyze[0]
+        tau_filter = args.lines_env_tau
+        if tau_filter is None and len(loaded.tau_values) != 1:
+            LOGGER.warning(
+                "lines-by-env-knob requested but multiple tau values found and --lines-env-tau not set; skipping."
+            )
+        else:
+            tau_target = tau_filter if tau_filter is not None else loaded.tau_values[0]
+            try:
+                env_series = aggregate_env_lines(
+                    loaded.records,
+                    loaded.knob_values,
+                    metric,
+                    env_key=args.lines_by_env_knob,
+                    tau_filter=tau_target,
+                )
+                plot_lines_by_env_knob(
+                    loaded.knob_values,
+                    env_series,
+                    vary=args.vary,
+                    env_key=args.lines_by_env_knob,
+                    output_path=args.out_dir / f"line_{args.vary}_by_{args.lines_by_env_knob}.png",
+                    colormap=args.lines_env_colormap,
+                )
+            except ValueError as err:
+                LOGGER.warning("lines-by-env-knob plot skipped: %s", err)
 
 
 if __name__ == "__main__":  # pragma: no cover - CLI entry point.

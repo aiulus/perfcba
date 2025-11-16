@@ -424,6 +424,12 @@ def run_trial(
         "parent_precision": parent_precision,
         "parent_recall": parent_recall,
         "hard_margin": float(instance.config.hard_margin),
+        "graph_density": float(instance.config.edge_prob),
+        "node_count": int(instance.config.n),
+        "parent_count": int(instance.config.k),
+        "intervention_size": int(instance.config.m),
+        "alphabet": int(instance.config.ell),
+        "arm_variance": float(instance.config.reward_logit_scale),
     }
     if structure_backend == "budgeted_raps" and raps_params is not None:
         record["raps_eps"] = raps_params.eps
@@ -590,6 +596,27 @@ def parse_args() -> argparse.Namespace:
         ],
         required=True,
         help="Environment knob to sweep.",
+    )
+    parser.add_argument(
+        "--env-vary",
+        choices=[
+            "graph_density",
+            "node_count",
+            "parent_count",
+            "intervention_size",
+            "alphabet",
+            "arm_variance",
+            "hard_margin",
+        ],
+        default=None,
+        help="Optional secondary environment knob to sweep alongside the primary --vary.",
+    )
+    parser.add_argument(
+        "--env-grid",
+        type=str,
+        nargs="+",
+        default=None,
+        help="Grid for --env-vary (accepts start[:step]:stop ranges).",
     )
     parser.add_argument(
         "--parent-grid",
@@ -913,6 +940,11 @@ def main() -> None:
     args.intervention_grid = _parse_grid_tokens(args.intervention_grid, int)
     args.raps_eps_grid = _parse_grid_tokens(args.raps_eps_grid, float)
     args.raps_reward_delta_grid = _parse_grid_tokens(args.raps_reward_delta_grid, float)
+    if args.env_vary is not None:
+        if args.env_grid is None:
+            raise ValueError("--env-vary requires --env-grid.")
+        parser_type = int if args.env_vary in {"node_count", "parent_count", "intervention_size", "alphabet"} else float
+        args.env_grid = _parse_grid_tokens(args.env_grid, parser_type)
     if args.hard_margin is None:
         hard_margin_values: Optional[List[float]] = None
     else:
@@ -967,9 +999,15 @@ def main() -> None:
         knob_values = [float(value) for value in args.tau_grid]
     else:
         knob_values = grid_values(args.vary, n=args.n, k=args.k)
+    if args.env_vary is not None:
+        if not args.env_grid:
+            raise ValueError("No values provided for --env-grid.")
+        env_values = [float(val) for val in args.env_grid]
+    else:
+        env_values = [None]
     results: List[Dict[str, Any]] = []
     tau_loop_len = len(args.tau_grid) if args.vary != "tau" else 1
-    total_trials = len(knob_values) * tau_loop_len * len(seeds)
+    total_trials = len(env_values) * len(knob_values) * tau_loop_len * len(seeds)
     progress = tqdm(total=total_trials, desc="Tau study", unit="trial")
     timeline_dir: Optional[Path] = args.timeline_dir
     timeline_store = defaultdict(list) if timeline_dir is not None else None
@@ -1015,170 +1053,187 @@ def main() -> None:
         hoeffding_alpha=args.effect_threshold_alpha,
     )
 
-    try:
-        for knob_value in knob_values:
-            cfg = base_cfg
-            if args.vary == "graph_density":
-                cfg = dataclasses.replace(cfg, edge_prob=float(knob_value))
-            elif args.vary == "node_count":
-                new_n = int(knob_value)
-                if new_n < cfg.k:
-                    raise ValueError(f"node_count grid value {new_n} must be >= k={cfg.k}")
-                new_m = min(cfg.m, new_n)
-                cfg = dataclasses.replace(
-                    cfg,
-                    n=new_n,
-                    m=new_m,
-                    edge_prob=2.0 / max(1, new_n),
-                )
-            elif args.vary == "parent_count":
-                new_k = int(knob_value)
-                cfg = dataclasses.replace(cfg, k=new_k, m=max(new_k, cfg.m))
-            elif args.vary == "intervention_size":
-                cfg = dataclasses.replace(cfg, m=int(knob_value))
-            elif args.vary == "alphabet":
-                cfg = dataclasses.replace(cfg, ell=int(knob_value))
-            elif args.vary == "horizon":
-                pass  # handled via args.T when running trials
-            elif args.vary == "arm_variance":
-                cfg = dataclasses.replace(cfg, reward_logit_scale=float(knob_value))
-            elif args.vary == "hard_margin":
-                cfg = dataclasses.replace(cfg, hard_margin=float(knob_value))
-
-            current_horizon = args.T if args.vary != "horizon" else int(knob_value)
-            subset_size = subset_size_for_known_k(cfg, current_horizon)
-            adaptive_cfg = adaptive_config_from_args(args, current_horizon)
-            adaptive_cfg_dict = dataclasses.asdict(adaptive_cfg) if adaptive_cfg is not None else None
-            arm_builder_cfg = HybridArmConfig(
-                enabled=bool(args.hybrid_arms),
-                max_fillers=args.hybrid_max_fillers,
-                max_hybrid_arms=args.hybrid_max_hybrid_arms,
+    def apply_knob(cfg: CausalBanditConfig, vary: str, value: float) -> Tuple[CausalBanditConfig, Optional[int], Optional[List[float]]]:
+        """Return updated config plus optional horizon override and tau grid override."""
+        horizon_override: Optional[int] = None
+        tau_override: Optional[List[float]] = None
+        if vary == "graph_density":
+            cfg = dataclasses.replace(cfg, edge_prob=float(value))
+        elif vary == "node_count":
+            new_n = int(value)
+            if new_n < cfg.k:
+                raise ValueError(f"node_count grid value {new_n} must be >= k={cfg.k}")
+            new_m = min(cfg.m, new_n)
+            cfg = dataclasses.replace(
+                cfg,
+                n=new_n,
+                m=new_m,
+                edge_prob=2.0 / max(1, new_n),
             )
-            current_eps = float(base_raps_eps)
-            current_reward_delta = float(base_raps_reward_delta)
-            if args.vary == "raps_eps":
-                current_eps = float(knob_value)
-            elif args.vary == "raps_reward_delta":
-                current_reward_delta = float(knob_value)
-            raps_params_for_knob: Optional[RAPSParams] = None
-            if args.structure_backend == "budgeted_raps":
-                raps_params_for_knob = RAPSParams(
-                    eps=current_eps,
-                    Delta=current_reward_delta,
-                    delta=args.raps_delta,
+        elif vary == "parent_count":
+            new_k = int(value)
+            cfg = dataclasses.replace(cfg, k=new_k, m=max(new_k, cfg.m))
+        elif vary == "intervention_size":
+            cfg = dataclasses.replace(cfg, m=int(value))
+        elif vary == "alphabet":
+            cfg = dataclasses.replace(cfg, ell=int(value))
+        elif vary == "arm_variance":
+            cfg = dataclasses.replace(cfg, reward_logit_scale=float(value))
+        elif vary == "hard_margin":
+            cfg = dataclasses.replace(cfg, hard_margin=float(value))
+        elif vary == "horizon":
+            horizon_override = int(value)
+        elif vary == "tau":
+            tau_override = [float(value)]
+        return cfg, horizon_override, tau_override
+
+    try:
+        for env_value in env_values:
+            cfg_env, env_horizon_override, env_tau_override = apply_knob(base_cfg, args.env_vary, env_value) if args.env_vary else (base_cfg, None, None)
+            for knob_value in knob_values:
+                cfg, knob_horizon_override, knob_tau_override = apply_knob(cfg_env, args.vary, knob_value)
+                current_horizon = env_horizon_override if env_horizon_override is not None else args.T
+                if knob_horizon_override is not None:
+                    current_horizon = knob_horizon_override
+                if knob_tau_override is not None:
+                    tau_iter = knob_tau_override
+                elif env_tau_override is not None:
+                    tau_iter = env_tau_override
+                else:
+                    tau_iter = list(args.tau_grid)
+
+                subset_size = subset_size_for_known_k(cfg, current_horizon)
+                adaptive_cfg = adaptive_config_from_args(args, current_horizon)
+                adaptive_cfg_dict = dataclasses.asdict(adaptive_cfg) if adaptive_cfg is not None else None
+                arm_builder_cfg = HybridArmConfig(
+                    enabled=bool(args.hybrid_arms),
+                    max_fillers=args.hybrid_max_fillers,
+                    max_hybrid_arms=args.hybrid_max_hybrid_arms,
                 )
-
-            tau_iter = args.tau_grid if args.vary != "tau" else [float(knob_value)]
-            for tau in tau_iter:
-                for seed in seeds:
-                    cache_key = (
-                        cfg,
-                        int(seed),
-                        cache_mode,
-                        sampling.min_samples,
-                        sampling.structure_mc_samples,
-                        sampling.arm_mc_samples,
-                        sampling.optimal_mean_mc_samples,
-                    )
-                    identity = make_trial_identity(
-                        cfg,
-                        horizon=current_horizon,
-                        tau=float(tau),
-                        seed=seed,
-                        knob_value=float(knob_value),
-                        scheduler=args.scheduler,
-                        structure_backend=args.structure_backend,
-                        subset_size=subset_size,
-                        use_full_budget=args.etc_use_full_budget,
-                        effect_threshold=effect_threshold_value,
-                        min_samples=sampling.min_samples,
-                        adaptive_config=adaptive_cfg_dict,
-                        hybrid_config=dataclasses.asdict(arm_builder_cfg),
-                        raps_params=dataclasses.asdict(raps_params_for_knob)
-                        if raps_params_for_knob is not None
-                        else None,
-                        structure_mc_samples=sampling.structure_mc_samples,
-                        arm_mc_samples=sampling.arm_mc_samples,
-                        optimal_mean_mc_samples=sampling.optimal_mean_mc_samples,
+                current_eps = float(base_raps_eps)
+                current_reward_delta = float(base_raps_reward_delta)
+                if args.vary == "raps_eps":
+                    current_eps = float(knob_value)
+                elif args.vary == "raps_reward_delta":
+                    current_reward_delta = float(knob_value)
+                raps_params_for_knob: Optional[RAPSParams] = None
+                if args.structure_backend == "budgeted_raps":
+                    raps_params_for_knob = RAPSParams(
+                        eps=current_eps,
+                        Delta=current_reward_delta,
+                        delta=args.raps_delta,
                     )
 
-                    artifact = load_trial_artifact(reuse_dir, identity) if reuse_dir is not None else None
-                    ran_trial = artifact is None
-
-                    if artifact is not None:
-                        record = artifact.record
-                        summary = artifact.summary
-                        optimal_mean = artifact.optimal_mean
-                    else:
-                        prepared_instance = prepared_cache.get(cache_key)
-                        if prepared_instance is None:
-                            prepared_instance = prepare_instance(
-                                cfg,
-                                seed,
-                                enable_cache=cache_enabled,
-                                sampling=sampling,
-                            )
-                            prepared_cache[cache_key] = prepared_instance
-                        record, summary, optimal_mean = run_trial(
-                            base_cfg=cfg,
+                for tau in tau_iter:
+                    for seed in seeds:
+                        cache_key = (
+                            cfg,
+                            int(seed),
+                            cache_mode,
+                            sampling.min_samples,
+                            sampling.structure_mc_samples,
+                            sampling.arm_mc_samples,
+                            sampling.optimal_mean_mc_samples,
+                        )
+                        identity = make_trial_identity(
+                            cfg,
                             horizon=current_horizon,
-                            tau=tau,
+                            tau=float(tau),
                             seed=seed,
                             knob_value=float(knob_value),
+                            scheduler=args.scheduler,
+                            structure_backend=args.structure_backend,
                             subset_size=subset_size,
-                            scheduler_mode=args.scheduler,
                             use_full_budget=args.etc_use_full_budget,
                             effect_threshold=effect_threshold_value,
-                            sampling=sampling,
-                            adaptive_config=adaptive_cfg,
-                            structure_backend=args.structure_backend,
-                            raps_params=raps_params_for_knob,
-                            arm_builder_cfg=arm_builder_cfg,
-                            prepared=prepared_instance,
+                            min_samples=sampling.min_samples,
+                            adaptive_config=adaptive_cfg_dict,
+                            hybrid_config=dataclasses.asdict(arm_builder_cfg),
+                            raps_params=dataclasses.asdict(raps_params_for_knob)
+                            if raps_params_for_knob is not None
+                            else None,
+                            structure_mc_samples=sampling.structure_mc_samples,
+                            arm_mc_samples=sampling.arm_mc_samples,
+                            optimal_mean_mc_samples=sampling.optimal_mean_mc_samples,
                         )
 
-                    scheduler_label = args.scheduler if args.structure_backend == "proxy" else "budgeted_raps"
-                    record = enrich_record_with_metadata(
-                        record,
-                        summary=summary,
-                        identity=identity,
-                        horizon=current_horizon,
-                        scheduler=scheduler_label,
-                    )
+                        artifact = load_trial_artifact(reuse_dir, identity) if reuse_dir is not None else None
+                        ran_trial = artifact is None
 
-                    if persist_dir is not None and ran_trial:
-                        metadata = build_metadata(
-                            cli_args={
-                                **cli_args_snapshot,
-                                "tau": float(tau),
-                                "seed": int(seed),
-                                "knob_value": float(knob_value),
-                            }
-                        )
-                        trial_artifact = TrialArtifact(
-                            identity=identity,
-                            record=record,
+                        if artifact is not None:
+                            record = artifact.record
+                            summary = artifact.summary
+                            optimal_mean = artifact.optimal_mean
+                        else:
+                            prepared_instance = prepared_cache.get(cache_key)
+                            if prepared_instance is None:
+                                prepared_instance = prepare_instance(
+                                    cfg,
+                                    seed,
+                                    enable_cache=cache_enabled,
+                                    sampling=sampling,
+                                )
+                                prepared_cache[cache_key] = prepared_instance
+                            record, summary, optimal_mean = run_trial(
+                                base_cfg=cfg,
+                                horizon=current_horizon,
+                                tau=tau,
+                                seed=seed,
+                                knob_value=float(knob_value),
+                                subset_size=subset_size,
+                                scheduler_mode=args.scheduler,
+                                use_full_budget=args.etc_use_full_budget,
+                                effect_threshold=effect_threshold_value,
+                                sampling=sampling,
+                                adaptive_config=adaptive_cfg,
+                                structure_backend=args.structure_backend,
+                                raps_params=raps_params_for_knob,
+                                arm_builder_cfg=arm_builder_cfg,
+                                prepared=prepared_instance,
+                            )
+
+                        scheduler_label = args.scheduler if args.structure_backend == "proxy" else "budgeted_raps"
+                        record = enrich_record_with_metadata(
+                            record,
                             summary=summary,
-                            optimal_mean=optimal_mean,
-                            metadata=metadata,
+                            identity=identity,
+                            horizon=current_horizon,
+                            scheduler=scheduler_label,
                         )
-                        write_trial_artifact(persist_dir, trial_artifact)
 
-                    results.append(record)
-                    if timeline_dir is not None:
-                        schedule = encode_schedule(summary.logs)
-                        key = (float(knob_value), float(tau))
-                        timeline_store[key].append((seed, schedule))
-                        per_seed_path = timeline_dir / f"timeline_knob-{_format_value(float(knob_value))}_tau-{_format_value(float(tau))}_seed-{seed}.png"
-                        plot_time_allocation(
-                            schedule,
-                            per_seed_path,
-                            title=f"knob={_format_value(float(knob_value))}, tau={_format_value(float(tau))}, seed={seed}",
-                            yticklabels=[f"seed {seed}"],
-                            max_columns=args.timeline_max_columns,
-                        )
-                    progress.set_postfix(knob=knob_value, tau=tau, seed=seed)
-                    progress.update(1)
+                        if persist_dir is not None and ran_trial:
+                            metadata = build_metadata(
+                                cli_args={
+                                    **cli_args_snapshot,
+                                    "tau": float(tau),
+                                    "seed": int(seed),
+                                    "knob_value": float(knob_value),
+                                }
+                            )
+                            trial_artifact = TrialArtifact(
+                                identity=identity,
+                                record=record,
+                                summary=summary,
+                                optimal_mean=optimal_mean,
+                                metadata=metadata,
+                            )
+                            write_trial_artifact(persist_dir, trial_artifact)
+
+                        results.append(record)
+                        if timeline_dir is not None:
+                            schedule = encode_schedule(summary.logs)
+                            key = (float(knob_value), float(tau))
+                            timeline_store[key].append((seed, schedule))
+                            per_seed_path = timeline_dir / f"timeline_knob-{_format_value(float(knob_value))}_tau-{_format_value(float(tau))}_seed-{seed}.png"
+                            plot_time_allocation(
+                                schedule,
+                                per_seed_path,
+                                title=f"knob={_format_value(float(knob_value))}, tau={_format_value(float(tau))}, seed={seed}",
+                                yticklabels=[f"seed {seed}"],
+                                max_columns=args.timeline_max_columns,
+                            )
+                        progress.set_postfix(knob=knob_value, tau=tau, seed=seed)
+                        progress.update(1)
     finally:
         progress.close()
 
