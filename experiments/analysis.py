@@ -233,6 +233,108 @@ def plot_metric_lines(
     plt.close(fig)
 
 
+def aggregate_metric_series_by_knob(
+    records: Sequence[Mapping[str, Any]],
+    tau_values: Sequence[float],
+    metric: str,
+) -> Dict[float, Tuple[np.ndarray, np.ndarray, np.ndarray]]:
+    """Group per knob value and aggregate mean/std/count across seeds for each tau."""
+    tau_index = {tau: idx for idx, tau in enumerate(tau_values)}
+    per_knob: Dict[float, List[List[float]]] = {}
+    for record in records:
+        if metric not in record:
+            continue
+        tau_idx = tau_index.get(float(record["tau"]))
+        if tau_idx is None:
+            continue
+        knob = float(record["knob_value"])
+        if knob not in per_knob:
+            per_knob[knob] = [[] for _ in tau_values]
+        per_knob[knob][tau_idx].append(float(record[metric]))
+
+    aggregated: Dict[float, Tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
+    for knob, buckets in per_knob.items():
+        means: List[float] = []
+        stds: List[float] = []
+        counts: List[int] = []
+        for bucket in buckets:
+            if not bucket:
+                means.append(math.nan)
+                stds.append(math.nan)
+                counts.append(0)
+                continue
+            arr = np.asarray(bucket, dtype=float)
+            means.append(float(np.mean(arr)))
+            stds.append(float(np.std(arr)))
+            counts.append(int(arr.size))
+        aggregated[knob] = (np.asarray(means), np.asarray(stds), np.asarray(counts))
+    return aggregated
+
+
+def plot_lines_by_knob(
+    tau_values: Sequence[float],
+    knob_series: Mapping[float, Tuple[np.ndarray, np.ndarray, np.ndarray]],
+    *,
+    vary: str,
+    output_path: Path,
+    colormap: Optional[str] = None,
+) -> None:
+    xs = np.asarray(tau_values, dtype=float)
+    if xs.size == 0:
+        raise ValueError("No tau values available for line plot.")
+    knobs_sorted = sorted(knob_series.keys())
+    if not knobs_sorted:
+        raise ValueError("No knob series available for plotting.")
+
+    cmap_name = colormap
+    default_cmaps = {
+        "graph_density": "Greens",
+        "parent_count": "Blues",
+        "arm_variance": "magma",
+        "intervention_size": "Oranges",
+        "node_count": "cividis",
+    }
+    if not cmap_name:
+        cmap_name = default_cmaps.get(vary, "viridis")
+    cmap = plt.get_cmap(cmap_name)
+
+    vmin, vmax = min(knobs_sorted), max(knobs_sorted)
+    span = vmax - vmin if vmax != vmin else 1.0
+
+    fig, ax = plt.subplots(figsize=(8, 4.5))
+    for knob in knobs_sorted:
+        means, stds, _counts = knob_series[knob]
+        if means.size != xs.size:
+            continue
+        mask = np.isfinite(means)
+        if not mask.any():
+            continue
+        normed = (knob - vmin) / span
+        color = cmap(normed)
+        label = f"{vary.replace('_', ' ')}={knob:g}"
+        ax.plot(xs[mask], means[mask], marker="o", linewidth=1.8, color=color, label=label)
+        if stds.size == means.size:
+            std_vals = stds[mask]
+            if std_vals.size and np.isfinite(std_vals).any():
+                std_vals = np.where(np.isfinite(std_vals), std_vals, 0.0)
+                ax.fill_between(
+                    xs[mask],
+                    means[mask] - std_vals,
+                    means[mask] + std_vals,
+                    alpha=0.12,
+                    color=color,
+                )
+
+    ax.set_xlabel("Tau")
+    ax.set_ylabel("Metric value")
+    ax.grid(True, linestyle="--", alpha=0.3)
+    ax.legend(ncol=2, fontsize="small", title=vary.replace("_", " ").title())
+    fig.tight_layout()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=200)
+    plt.close(fig)
+
+
 def _fill_nan_with_column_means(matrix: np.ndarray) -> np.ndarray:
     filled = np.array(matrix, copy=True)
     if not np.isnan(filled).any():
@@ -697,6 +799,20 @@ def parse_args() -> argparse.Namespace:
         default="heatmap",
         help="Select 'line' to collapse across tau and draw multi-metric line plots versus the swept knob.",
     )
+    parser.add_argument(
+        "--lines-by-knob",
+        action="store_true",
+        help=(
+            "Draw a family of lines (one per knob value) over the tau grid for the first requested metric, "
+            "with color shading by knob magnitude. Uses --vary to determine the label."
+        ),
+    )
+    parser.add_argument(
+        "--line-colormap",
+        type=str,
+        default=None,
+        help="Matplotlib colormap name for --lines-by-knob; defaults to a preset based on --vary.",
+    )
     parser.add_argument("--sigma", type=float, default=0.5, help="Gaussian smoothing sigma used for gradient visualization.")
     parser.add_argument("--no-smooth", action="store_true", help="Disable smoothing before computing gradient arrows.")
     parser.add_argument("--bootstrap", type=int, default=256, help="Number of bootstrap resamples for gradient CIs.")
@@ -813,6 +929,20 @@ def main() -> None:
             )
         except ValueError as err:
             LOGGER.warning("Line plot skipped: %s", err)
+
+    if args.lines_by_knob and metrics_to_analyze:
+        metric = metrics_to_analyze[0]
+        try:
+            knob_series = aggregate_metric_series_by_knob(loaded.records, loaded.tau_values, metric)
+            plot_lines_by_knob(
+                loaded.tau_values,
+                knob_series,
+                vary=args.vary,
+                output_path=args.out_dir / f"lines_by_knob_{metric}.png",
+                colormap=args.line_colormap,
+            )
+        except ValueError as err:
+            LOGGER.warning("lines-by-knob plot skipped: %s", err)
 
 
 if __name__ == "__main__":  # pragma: no cover - CLI entry point.

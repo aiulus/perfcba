@@ -2,6 +2,7 @@
 /tests/
 /results/
 /docs/
+perfcba.egg-info/
 
 # Python artifacts
 __pycache__/
