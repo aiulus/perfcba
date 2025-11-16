@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=64", "setuptools_scm>=7"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "perfcba"
+version = "0.0.0"
+description = "Performance studies for causal bandits with budgeted RAPS schedulers"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "numpy",
+    "tqdm",
+]
+
+[tool.setuptools]
+packages = ["perfcba"]
+package-dir = { "perfcba" = "." }
