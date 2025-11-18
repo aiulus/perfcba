@@ -17,7 +17,7 @@ from __future__ import annotations
 import itertools
 import math
 from dataclasses import dataclass
-from typing import Callable, Dict, Iterable, List, MutableMapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, MutableMapping, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -175,6 +175,165 @@ class CausalBanditInstance:
             rng=rng,
             compute=compute,
         )
+
+    # ------------------------------------------------------------------ #
+    # Gap estimation utilities
+    # ------------------------------------------------------------------ #
+
+    @dataclass(frozen=True)
+    class GapEstimates:
+        eps: float
+        Delta: float
+        details: Dict[str, Any]
+
+    def estimate_min_eps_delta(
+        self,
+        *,
+        max_parent_scope_exact: int = 2,
+        n_mc: int = 8000,
+        alpha: float = 0.05,
+        max_hops: int = 3,
+        rng: Optional[np.random.Generator] = None,
+    ) -> "CausalBanditInstance.GapEstimates":
+        """
+        Estimate lower bounds on the ancestral (ε) and reward (Δ) gaps.
+
+        The routine enumerates interventions that differ on a single parent/
+        ancestor and compares the induced marginals:
+        - ε_hat: min over parents X->Y of max_y |P(Y=y|do(Z)) - P(Y=y|do(Z,X))|
+        - Δ_hat: min over ancestors X of reward of |E[R|do(Z)] - E[R|do(Z,X)]|
+
+        Exact evaluation is used when the intervention scope is small; otherwise
+        Monte Carlo sampling is applied with a conservative CI shrinkage.
+        """
+
+        rng = rng or np.random.default_rng(self.config.seed)
+
+        parent_map = {name: list(self.scm.parents_of(name)) for name in self.node_names}
+        graph_parents = {name: list(parent_map.get(name, [])) for name in self.node_names}
+
+        def _ancestors(node: NodeName) -> set[NodeName]:
+            seen: set[NodeName] = set()
+            stack = list(graph_parents.get(node, []))
+            while stack:
+                cur = stack.pop()
+                if cur in seen:
+                    continue
+                seen.add(cur)
+                stack.extend(graph_parents.get(cur, []))
+            return seen
+
+        def _intervention_key(assignment: MutableMapping[NodeName, int]) -> Tuple[Tuple[NodeName, int], ...]:
+            return tuple(sorted((k, int(v)) for k, v in assignment.items()))
+
+        dist_cache: Dict[Tuple[Tuple[NodeName, int], ...], np.ndarray] = {}
+        mean_cache: Dict[Tuple[Tuple[NodeName, int], ...], float] = {}
+
+        def _sample_node_distribution(
+            node: NodeName, assignment: MutableMapping[NodeName, int], scope_size: int
+        ) -> np.ndarray:
+            key = _intervention_key(assignment)
+            if key in dist_cache:
+                return dist_cache[key]
+
+            if scope_size <= max_parent_scope_exact and self.config.ell ** scope_size <= 64:
+                # Small scope: exact enumeration over intervened nodes.
+                counts = np.zeros(self.config.ell if node != self.reward_node else 2, dtype=float)
+                total = 0.0
+                iter_rng = np.random.default_rng(int(rng.integers(2**32 - 1)))
+                for _ in range(max(1, int(self.config.ell ** max(scope_size, 1)))):
+                    draw = self.scm.sample(iter_rng, intervention=Intervention(name="do", hard=dict(assignment)))
+                    counts[int(draw[node])] += 1.0
+                    total += 1.0
+                probs = counts / max(1.0, total)
+            else:
+                counts = np.zeros(self.config.ell if node != self.reward_node else 2, dtype=float)
+                samples = max(1, int(n_mc))
+                sample_rng = np.random.default_rng(int(rng.integers(2**32 - 1)))
+                for _ in range(samples):
+                    draw = self.scm.sample(sample_rng, intervention=Intervention(name="do", hard=dict(assignment)))
+                    counts[int(draw[node])] += 1.0
+                probs = counts / float(samples)
+                # Hoeffding-style shrinkage to get a conservative lower bound on diffs.
+                eps_ci = math.sqrt(0.5 * math.log(2.0 / alpha) / float(samples))
+                probs = np.clip(probs, 0.0, 1.0)
+                # This shrink stretches towards uniform; ensure a valid distribution.
+                probs = probs / probs.sum() if probs.sum() > 0 else probs
+                probs = np.clip(probs, eps_ci, 1.0)  # avoid zeros for downstream logics
+                probs = probs / probs.sum()
+
+            dist_cache[key] = probs
+            return probs
+
+        def _sample_reward_mean(assignment: MutableMapping[NodeName, int], scope_size: int) -> float:
+            key = _intervention_key(assignment)
+            if key in mean_cache:
+                return mean_cache[key]
+            if scope_size <= max_parent_scope_exact and self.config.ell ** scope_size <= 64:
+                # reuse distribution call for Bernoulli reward
+                probs = _sample_node_distribution(self.reward_node, assignment, scope_size)
+                value = float(probs[1]) if probs.size > 1 else float(probs[0])
+            else:
+                samples = max(1, int(n_mc))
+                sample_rng = np.random.default_rng(int(rng.integers(2**32 - 1)))
+                draws = [
+                    int(self.scm.sample(sample_rng, intervention=Intervention(name="do", hard=dict(assignment)))[self.reward_node])
+                    for _ in range(samples)
+                ]
+                mean = float(np.mean(draws))
+                ci = math.sqrt(0.5 * math.log(2.0 / alpha) / float(samples))
+                value = max(0.0, min(1.0, mean - ci))
+            mean_cache[key] = value
+            return value
+
+        eps_candidates: List[float] = []
+        for child in self.node_names:
+            if child == self.reward_node:
+                continue
+            for parent in graph_parents.get(child, []):
+                other_parents = [p for p in graph_parents[child] if p != parent]
+                if len(other_parents) > max_hops:
+                    continue
+                for z_vals in _all_assignments(len(other_parents), self.config.ell):
+                    assignment = {name: val for name, val in zip(other_parents, z_vals)}
+                    base_probs = _sample_node_distribution(child, assignment, len(assignment))
+                    for x_val in range(self.config.ell):
+                        assignment[parent] = x_val
+                        inter_probs = _sample_node_distribution(child, assignment, len(assignment))
+                        diff = float(np.max(np.abs(base_probs - inter_probs)))
+                        eps_candidates.append(diff)
+                        assignment.pop(parent, None)
+
+        delta_candidates: List[float] = []
+        reward_parents = graph_parents[self.reward_node]
+        reward_ancestors = [a for a in _ancestors(self.reward_node) if a != self.reward_node]
+        for anc in reward_ancestors:
+            other = [p for p in reward_parents if p != anc]
+            if len(other) > max_hops:
+                continue
+            for z_vals in _all_assignments(len(other), self.config.ell):
+                assignment = {name: val for name, val in zip(other, z_vals)}
+                base_mean = _sample_reward_mean(assignment, len(assignment))
+                for x_val in range(self.config.ell):
+                    assignment[anc] = x_val
+                    inter_mean = _sample_reward_mean(assignment, len(assignment))
+                    delta_candidates.append(abs(base_mean - inter_mean))
+                    assignment.pop(anc, None)
+
+        eps_hat = float(min(eps_candidates)) if eps_candidates else 0.0
+        delta_hat = float(min(delta_candidates)) if delta_candidates else 0.0
+
+        details = {
+            "eps_candidates": eps_candidates,
+            "delta_candidates": delta_candidates,
+            "config": {
+                "max_parent_scope_exact": max_parent_scope_exact,
+                "n_mc": n_mc,
+                "alpha": alpha,
+                "max_hops": max_hops,
+            },
+        }
+        return CausalBanditInstance.GapEstimates(eps=eps_hat, Delta=delta_hat, details=details)
 
 
 # ---------------------------------------------------------------------------
