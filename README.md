@@ -61,10 +61,10 @@ directly.
 `budgeted_raps` (default) reuses the official `RAPSUCB` implementation via
 `perfcba.budgeted_raps`, while `proxy` keeps the lightweight heuristic learner
 for ablations.  When the budgeted backend is active the CLI also honors
-`--raps-eps`, `--raps-reward-delta`, and `--raps-delta`, mirroring the finite-sample
+`--algo-eps`, `--algo-delta`, and `--raps-delta`, mirroring the finite-sample
 constants from the reference code.  You can sweep those gaps directly via
-`--vary raps_eps` or `--vary raps_reward_delta`, optionally overriding the default
-grids with `--raps-eps-grid` / `--raps-reward-delta-grid`.
+`--vary algo_eps` or `--vary algo_delta`, optionally overriding the default
+grids with `--algo-eps-grid` / `--algo-delta-grid`.
 
 ### Single-knob performance curves
 
@@ -77,7 +77,7 @@ python -m perfcba.experiments.run_tau_study \
   --tau-grid 0.0 0.1 0.2 0.4 0.6 0.8 1.0 \
   --n 50 --ell 2 --k 2 --m 2 --T 10000 \
   --graph-grid 0.3 --parent-grid 2 --node-grid 50 \
-  --raps-eps 0.05 --raps-reward-delta 0.05 \
+  --algo-eps 0.05 --algo-delta 0.05 \
   --seeds 0:19 \
   --scheduler interleaved \
   --output-dir results/tau_study/tau_sweep_fixed_env
@@ -85,7 +85,7 @@ python -m perfcba.experiments.run_tau_study \
 
 When sweeping `--vary intervention_size`, pass `--intervention-grid <values>` (including optional `start[:step]:stop` ranges) to control the exact `m` settings such as `{1, 2, 3, 4, 5}`.
 
-Switch `--vary raps_eps` or `--vary raps_reward_delta` (with matching grids)
+Switch `--vary algo_eps` or `--vary algo_delta` (with matching grids)
 to study the ancestral/reward-gap knobs at a fixed `tau`. After the sweep,
 turn the JSONL output into a line plot showing cumulative regret, time to
 optimality, simple regret, and optimal-action rate versus the knob:
@@ -114,6 +114,9 @@ Additional knobs introduced in this revision:
   `--optimal-mean-mc-samples` bubble up the Monte Carlo budgets that were
   previously only controllable via the `--small`/`--very-small` presets, so
   experiments with tiny reward gaps can dial up accuracy explicitly.
+- `--scm-epsilon` / `--scm-delta` bound every conditional probability away from
+  zero and one (reward CPTs use the tighter of the two), making it easy to
+  enforce robust SCM generation regimes.
 
 To probe reward noise, you can either set `--reward-logit-scale <value>` for a
 single configuration or sweep it via `--vary arm_variance`. The plots now

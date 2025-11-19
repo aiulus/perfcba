@@ -52,8 +52,8 @@ KNOB_LABELS = {
     "alphabet": ("Alphabet Size", "alphabet sizes"),
     "horizon": ("Horizon", "horizons"),
     "arm_variance": ("Reward Logit Scale", "reward logit scales"),
-    "raps_eps": ("Ancestral Gap ε", "ancestral gaps"),
-    "raps_reward_delta": ("Reward Gap Δ", "reward gaps"),
+    "algo_eps": ("Ancestral Gap ε", "ancestral gaps"),
+    "algo_delta": ("Reward Gap Δ", "reward gaps"),
     "hard_margin": ("Hard Margin", "hard margins"),
     "tau": ("Tau Budget", "tau values"),
 }
@@ -432,8 +432,8 @@ def run_trial(
         "arm_variance": float(instance.config.reward_logit_scale),
     }
     if structure_backend == "budgeted_raps" and raps_params is not None:
-        record["raps_eps"] = raps_params.eps
-        record["raps_reward_delta"] = raps_params.Delta
+        record["algo_eps"] = raps_params.eps
+        record["algo_delta"] = raps_params.Delta
         record["raps_delta"] = raps_params.delta
     return record, summary, optimal_mean
 
@@ -589,8 +589,8 @@ def parse_args() -> argparse.Namespace:
             "alphabet",
             "horizon",
             "arm_variance",
-            "raps_eps",
-            "raps_reward_delta",
+            "algo_eps",
+            "algo_delta",
             "hard_margin",
             "tau",
         ],
@@ -647,18 +647,18 @@ def parse_args() -> argparse.Namespace:
         help="Override intervention sizes when --vary intervention_size is used (accepts start[:step]:stop ranges).",
     )
     parser.add_argument(
-        "--raps-eps-grid",
+        "--algo-eps-grid",
         type=str,
         nargs="+",
         default=None,
-        help="Override epsilon (ancestral gap) values when --vary raps_eps is used.",
+        help="Override epsilon (ancestral gap) values when --vary algo_eps is used.",
     )
     parser.add_argument(
-        "--raps-reward-delta-grid",
+        "--algo-delta-grid",
         type=str,
         nargs="+",
         default=None,
-        help="Override reward-gap Δ values when --vary raps_reward_delta is used.",
+        help="Override reward-gap Δ values when --vary algo_delta is used.",
     )
     parser.add_argument("--n", type=int, default=50)
     parser.add_argument("--ell", type=int, default=2)
@@ -692,6 +692,18 @@ def parse_args() -> argparse.Namespace:
         metavar="M",
         help="Enable the hard parent-effect margin (TV distance). Provide zero/one/many values; no values use the default 0.1.",
     )
+    parser.add_argument(
+        "--scm-epsilon",
+        type=float,
+        default=0.0,
+        help="Lower bound applied to every CPT entry in generated SCMs.",
+    )
+    parser.add_argument(
+        "--scm-delta",
+        type=float,
+        default=0.0,
+        help="Lower bound applied to reward-conditionals only (after --scm-epsilon).",
+    )
     parser.add_argument("--seeds", type=str, default="0:9", help="Seed range start:end.")
     parser.add_argument(
         "--scheduler",
@@ -705,13 +717,13 @@ def parse_args() -> argparse.Namespace:
         help="Selects the structure learner: 'proxy' uses RAPSLearner, 'budgeted_raps' reuses the official implementation.",
     )
     parser.add_argument(
-        "--raps-eps",
+        "--algo-eps",
         type=float,
         default=0.05,
         help="Epsilon parameter for the budgeted RAPS backend.",
     )
     parser.add_argument(
-        "--raps-reward-delta",
+        "--algo-delta",
         type=float,
         default=0.05,
         help="Reward-gap parameter (Δ) for the budgeted RAPS backend.",
@@ -938,8 +950,8 @@ def main() -> None:
     args.graph_grid = _parse_grid_tokens(args.graph_grid, float)
     args.node_grid = _parse_grid_tokens(args.node_grid, int)
     args.intervention_grid = _parse_grid_tokens(args.intervention_grid, int)
-    args.raps_eps_grid = _parse_grid_tokens(args.raps_eps_grid, float)
-    args.raps_reward_delta_grid = _parse_grid_tokens(args.raps_reward_delta_grid, float)
+    args.algo_eps_grid = _parse_grid_tokens(args.algo_eps_grid, float)
+    args.algo_delta_grid = _parse_grid_tokens(args.algo_delta_grid, float)
     if args.env_vary is not None:
         if args.env_grid is None:
             raise ValueError("--env-vary requires --env-grid.")
@@ -976,9 +988,11 @@ def main() -> None:
         parent_effect=args.parent_effect,
         reward_logit_scale=args.reward_logit_scale,
         hard_margin=base_hard_margin,
+        scm_epsilon=args.scm_epsilon,
+        scm_delta=args.scm_delta,
     )
-    base_raps_eps = args.raps_eps
-    base_raps_reward_delta = args.raps_reward_delta
+    base_algo_eps = args.algo_eps
+    base_algo_delta = args.algo_delta
     if args.vary == "parent_count" and args.parent_grid:
         knob_values = [int(value) for value in args.parent_grid]
     elif args.vary == "graph_density" and args.graph_grid:
@@ -987,10 +1001,10 @@ def main() -> None:
         knob_values = [int(value) for value in args.node_grid]
     elif args.vary == "intervention_size" and args.intervention_grid:
         knob_values = [int(value) for value in args.intervention_grid]
-    elif args.vary == "raps_eps" and args.raps_eps_grid:
-        knob_values = [float(value) for value in args.raps_eps_grid]
-    elif args.vary == "raps_reward_delta" and args.raps_reward_delta_grid:
-        knob_values = [float(value) for value in args.raps_reward_delta_grid]
+    elif args.vary == "algo_eps" and args.algo_eps_grid:
+        knob_values = [float(value) for value in args.algo_eps_grid]
+    elif args.vary == "algo_delta" and args.algo_delta_grid:
+        knob_values = [float(value) for value in args.algo_delta_grid]
     elif args.vary == "hard_margin":
         if hard_margin_values is None:
             raise ValueError("No hard-margin values provided.")
@@ -1110,11 +1124,11 @@ def main() -> None:
                     max_fillers=args.hybrid_max_fillers,
                     max_hybrid_arms=args.hybrid_max_hybrid_arms,
                 )
-                current_eps = float(base_raps_eps)
-                current_reward_delta = float(base_raps_reward_delta)
-                if args.vary == "raps_eps":
+                current_eps = float(base_algo_eps)
+                current_reward_delta = float(base_algo_delta)
+                if args.vary == "algo_eps":
                     current_eps = float(knob_value)
-                elif args.vary == "raps_reward_delta":
+                elif args.vary == "algo_delta":
                     current_reward_delta = float(knob_value)
                 raps_params_for_knob: Optional[RAPSParams] = None
                 if args.structure_backend == "budgeted_raps":

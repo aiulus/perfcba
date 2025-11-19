@@ -51,6 +51,8 @@ class CausalBanditConfig:
     parent_effect: float = 1.0        # reference-mode mixing between base and parent-specific CPDs
     seed: Optional[int] = None
     hard_margin: float = 0.0          # TV distance enforced between parent assignments
+    scm_epsilon: float = 0.0          # lower bound enforced on every CPT entry
+    scm_delta: float = 0.0            # tighter lower bound for reward CPT entries
 
     def __post_init__(self) -> None:
         if self.n <= 0:
@@ -73,6 +75,19 @@ class CausalBanditConfig:
             raise ValueError("parent_effect must be in [0, 1]")
         if not (0.0 <= self.hard_margin < 1.0):
             raise ValueError("hard_margin must lie in [0, 1)")
+        if not (0.0 <= self.scm_epsilon < 0.5):
+            raise ValueError("scm_epsilon must lie in [0, 0.5).")
+        if self.scm_epsilon * self.ell >= 1.0:
+            raise ValueError("scm_epsilon must satisfy epsilon * ell < 1.")
+        if not (0.0 <= self.scm_delta < 0.5):
+            raise ValueError("scm_delta must lie in [0, 0.5).")
+        max_covariate_tv = 1.0 - self.ell * self.scm_epsilon if self.scm_epsilon > 0.0 else 1.0
+        if self.hard_margin - 1e-9 > max_covariate_tv:
+            raise ValueError("hard_margin is incompatible with scm_epsilon.")
+        reward_margin = max(self.scm_epsilon, self.scm_delta)
+        max_reward_tv = 1.0 - 2.0 * reward_margin if reward_margin > 0.0 else 1.0
+        if self.hard_margin - 1e-9 > max_reward_tv:
+            raise ValueError("hard_margin is incompatible with scm_delta/scm_epsilon.")
 
     def rng(self) -> np.random.Generator:
         """Return a generator seeded as requested (fresh instance each call)."""
@@ -371,14 +386,30 @@ def _table_satisfies_margin(table: Dict[Assignment, np.ndarray], margin: float) 
     return True
 
 
-def _force_margin_table(table: Dict[Assignment, np.ndarray], ell: int) -> None:
+def _apply_probability_margin(probs: np.ndarray, *, margin: float) -> np.ndarray:
+    if margin <= 0.0:
+        return probs
+    ell = probs.shape[0]
+    if margin * ell >= 1.0:
+        raise ValueError("Margin too large for the provided domain size.")
+    scale = 1.0 - ell * margin
+    return probs * scale + margin
+
+
+def _force_margin_table(table: Dict[Assignment, np.ndarray], ell: int, margin: float) -> None:
     if ell <= 1:
         return
     assignments = list(table.keys())
     for idx, assignment in enumerate(assignments):
-        probs = np.zeros(ell, dtype=float)
         anchor = idx % ell
-        probs[anchor] = 1.0
+        if margin <= 0.0:
+            probs = np.zeros(ell, dtype=float)
+            probs[anchor] = 1.0
+        else:
+            if margin * ell >= 1.0:
+                raise ValueError("Margin too large for fallback CPT construction.")
+            probs = np.full(ell, margin, dtype=float)
+            probs[anchor] = margin + (1.0 - ell * margin)
         table[assignment] = probs
 
 
@@ -390,6 +421,7 @@ def _sample_covariate_cpt(
     mode: str,
     parent_effect: float,
     hard_margin: float,
+    prob_margin: float,
 ) -> Dict[Assignment, np.ndarray]:
     assignments = list(_all_assignments(num_parents, ell))
     base_alpha = np.ones(ell, dtype=float)
@@ -401,13 +433,14 @@ def _sample_covariate_cpt(
                 rnd = rng.dirichlet(base_alpha)
                 probs = (1.0 - parent_effect) * base + parent_effect * rnd
                 probs = probs / probs.sum()
-                table[assignment] = probs
+                table[assignment] = _apply_probability_margin(probs, margin=prob_margin)
         else:
             for assignment in assignments:
-                table[assignment] = rng.dirichlet(base_alpha)
+                probs = rng.dirichlet(base_alpha)
+                table[assignment] = _apply_probability_margin(probs, margin=prob_margin)
         if _table_satisfies_margin(table, hard_margin):
             return table
-    _force_margin_table(table, ell)
+    _force_margin_table(table, ell, prob_margin)
     return table
 
 
@@ -420,6 +453,8 @@ def _sample_reward_cpt(
     *,
     mode: str,
     hard_margin: float,
+    prob_margin: float,
+    reward_margin: float,
 ) -> Dict[Assignment, np.ndarray]:
     assignments = list(_all_assignments(num_parents, ell))
     for _ in range(_HARD_MARGIN_MAX_ATTEMPTS):
@@ -430,10 +465,12 @@ def _sample_reward_cpt(
             else:
                 p = rng.beta(alpha, beta)
                 probs = np.array([1.0 - p, p], dtype=float)
+            probs = _apply_probability_margin(probs, margin=prob_margin)
+            probs = _apply_probability_margin(probs, margin=reward_margin)
             table[assignment] = probs
         if _table_satisfies_margin(table, hard_margin):
             return table
-    _force_margin_table(table, 2)
+    _force_margin_table(table, 2, max(prob_margin, reward_margin))
     return table
 
 
@@ -494,6 +531,8 @@ def build_random_scm(config: CausalBanditConfig, *, rng: Optional[np.random.Gene
         config.reward_beta if config.scm_mode != "reference" else 1.0,
         mode=config.scm_mode,
         hard_margin=config.hard_margin,
+        prob_margin=config.scm_epsilon,
+        reward_margin=config.scm_delta,
     )
     reward_table = _apply_reward_logit_scale(reward_table, logit_scale=config.reward_logit_scale)
 
@@ -516,6 +555,7 @@ def build_random_scm(config: CausalBanditConfig, *, rng: Optional[np.random.Gene
             mode=config.scm_mode,
             parent_effect=config.parent_effect,
             hard_margin=config.hard_margin,
+            prob_margin=config.scm_epsilon,
         )
         structural_functions[node] = make_node_fn(node, par_names, cpt, config.ell)
 
