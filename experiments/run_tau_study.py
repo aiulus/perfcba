@@ -17,7 +17,7 @@ from tqdm.auto import tqdm
 
 from ..SCM import Intervention
 from ..budgeted_raps import BudgetedRAPSResult, run_budgeted_raps
-from ..causal_bandits import RAPSParams
+from ..causal_bandits import RAPSParams, compute_budget
 from .artifacts import (
     TrialArtifact,
     TrialIdentity,
@@ -991,6 +991,7 @@ def main() -> None:
         scm_epsilon=args.scm_epsilon,
         scm_delta=args.scm_delta,
     )
+    budget_warning_cache: set[Tuple[int, int]] = set()
     base_algo_eps = args.algo_eps
     base_algo_delta = args.algo_delta
     if args.vary == "parent_count" and args.parent_grid:
@@ -1137,6 +1138,15 @@ def main() -> None:
                         Delta=current_reward_delta,
                         delta=args.raps_delta,
                     )
+                    budget_B = compute_budget(int(cfg.n), int(cfg.ell), raps_params_for_knob)
+                    warning_key = (int(budget_B), int(current_horizon))
+                    if current_horizon <= budget_B and warning_key not in budget_warning_cache:
+                        print(
+                            f"[tau-study][warning] Horizon T={int(current_horizon)} is <= the Budgeted RAPS "
+                            f"observation budget B={budget_B} (eps={current_eps}, Delta={current_reward_delta}, "
+                            f"delta={args.raps_delta}). The algorithm will only issue observe actions."
+                        )
+                        budget_warning_cache.add(warning_key)
 
                 for tau in tau_iter:
                     for seed in seeds:
