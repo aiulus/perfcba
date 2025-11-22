@@ -312,7 +312,7 @@ def main() -> None:
     progress.close()
 
     # Execute in pool.
-    results_map = run_jobs_in_pool(jobs, num_workers=args.num_workers)
+    results_map = run_jobs_in_pool(jobs, num_workers=args.num_workers, show_progress=True)
 
     # Aggregate records.
     records: List[Dict[str, Any]] = []

@@ -140,7 +140,7 @@ def main() -> None:
         )
         jobs.append((str(seed), fn))
     # Execute and collect records directly; no artifact reuse to simplify.
-    results_map = run_jobs_in_pool(jobs, num_workers=args.num_workers)
+    results_map = run_jobs_in_pool(jobs, num_workers=args.num_workers, show_progress=True)
 
     artifacts = []
     for seed in seeds:
