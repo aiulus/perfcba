@@ -48,6 +48,96 @@ def parse_args() -> argparse.Namespace:
         default=1.0,
         help="Reference-mode mixing coefficient between base and parent-specific CPDs.",
     )
+    parser.add_argument(
+        "--reward-logit-scale",
+        type=float,
+        default=1.0,
+        help="Scale applied to Bernoulli logits to control per-arm variance.",
+    )
+    parser.add_argument(
+        "--hard-margin",
+        type=float,
+        default=0.0,
+        help="Enable the hard parent-effect margin (TV distance).",
+    )
+    parser.add_argument(
+        "--scm-epsilon",
+        type=float,
+        default=0.0,
+        help="Lower bound applied to every CPT entry in generated SCMs.",
+    )
+    parser.add_argument(
+        "--scm-delta",
+        type=float,
+        default=0.0,
+        help="Lower bound applied to reward-conditionals only (after --scm-epsilon).",
+    )
+    parser.add_argument(
+        "--edge-prob",
+        type=float,
+        default=None,
+        help="Override baseline edge probability for all edges (defaults to 2/n if not provided).",
+    )
+    parser.add_argument(
+        "--edge-prob-covariates",
+        type=float,
+        default=None,
+        help="Optional override for covariate edges X->X (falls back to --edge-prob or 2/n).",
+    )
+    parser.add_argument(
+        "--edge-prob-to-reward",
+        type=float,
+        default=None,
+        help="Optional override for reward edges X->Y (falls back to --edge-prob or 2/n).",
+    )
+    parser.add_argument(
+        "--arm-heterogeneity-mode",
+        choices=["uniform", "sparse", "clustered"],
+        default="uniform",
+        help="Reward heterogeneity structure.",
+    )
+    parser.add_argument(
+        "--sparse-fraction",
+        type=float,
+        default=0.1,
+        help="Fraction of special assignments when arm-heterogeneity-mode=sparse.",
+    )
+    parser.add_argument(
+        "--sparse-separation",
+        type=float,
+        default=0.3,
+        help="Minimum separation from the base mean for sparse special assignments.",
+    )
+    parser.add_argument(
+        "--cluster-count",
+        type=int,
+        default=3,
+        help="Number of clusters when arm-heterogeneity-mode=clustered.",
+    )
+    parser.add_argument(
+        "--target-epsilon",
+        type=float,
+        default=None,
+        help="Target ancestral gap ε for environment generation (optional).",
+    )
+    parser.add_argument(
+        "--target-delta",
+        type=float,
+        default=None,
+        help="Target reward gap Δ for environment generation (optional).",
+    )
+    parser.add_argument(
+        "--gap-enforcement-mode",
+        choices=["soft", "hard", "reject"],
+        default="soft",
+        help="Control acceptance when target gaps are not met.",
+    )
+    parser.add_argument(
+        "--max-rejection-attempts",
+        type=int,
+        default=128,
+        help="Maximum attempts for gap-targeted SCM generation.",
+    )
     parser.add_argument("--T", type=int, default=10_000, help="Horizon length.")
     parser.add_argument("--tau", type=float, required=True, help="Tau budget for structure learning.")
     parser.add_argument("--knob-value", type=float, default=0.0, help="Metadata label recorded in artifacts.")
@@ -274,14 +364,29 @@ def main() -> None:
     if not seeds:
         raise ValueError("No seeds specified.")
     m_value = args.m if args.m is not None else args.k
+    base_edge_prob = args.edge_prob if args.edge_prob is not None else 2.0 / max(1, args.n)
     cfg = CausalBanditConfig(
         n=args.n,
         ell=args.ell,
         k=args.k,
         m=m_value,
-        edge_prob=2.0 / max(1, args.n),
+        edge_prob=base_edge_prob,
+        edge_prob_covariates=args.edge_prob_covariates,
+        edge_prob_to_reward=args.edge_prob_to_reward,
         scm_mode=args.scm_mode,
         parent_effect=args.parent_effect,
+        reward_logit_scale=args.reward_logit_scale,
+        hard_margin=args.hard_margin,
+        scm_epsilon=args.scm_epsilon,
+        scm_delta=args.scm_delta,
+        arm_heterogeneity_mode=args.arm_heterogeneity_mode,
+        sparse_fraction=args.sparse_fraction,
+        sparse_separation=args.sparse_separation,
+        cluster_count=args.cluster_count,
+        target_epsilon=args.target_epsilon,
+        target_delta=args.target_delta,
+        gap_enforcement_mode=args.gap_enforcement_mode,
+        max_rejection_attempts=args.max_rejection_attempts,
     )
     horizon = args.T
     subset_size = subset_size_for_known_k(cfg, horizon)

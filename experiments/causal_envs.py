@@ -14,6 +14,7 @@ This module provides two main building blocks:
 
 from __future__ import annotations
 
+import dataclasses
 import itertools
 import math
 from dataclasses import dataclass
@@ -55,6 +56,12 @@ class CausalBanditConfig:
     hard_margin: float = 0.0          # TV distance enforced between parent assignments
     scm_epsilon: float = 0.0          # lower bound enforced on every CPT entry
     scm_delta: float = 0.0            # tighter lower bound for reward CPT entries
+
+    # Gap targeting (optional; keeps hard_margin for backward compatibility)
+    target_epsilon: Optional[float] = None
+    target_delta: Optional[float] = None
+    gap_enforcement_mode: str = "soft"  # one of {"soft", "hard", "reject"}
+    max_rejection_attempts: int = 128
 
     # Reward heterogeneity controls
     arm_heterogeneity_mode: str = "uniform"  # one of {"uniform", "sparse", "clustered"}
@@ -100,6 +107,14 @@ class CausalBanditConfig:
         max_reward_tv = 1.0 - 2.0 * reward_margin if reward_margin > 0.0 else 1.0
         if self.hard_margin - 1e-9 > max_reward_tv:
             raise ValueError("hard_margin is incompatible with scm_delta/scm_epsilon.")
+        if self.target_epsilon is not None and self.target_epsilon < 0.0:
+            raise ValueError("target_epsilon must be non-negative when provided.")
+        if self.target_delta is not None and self.target_delta < 0.0:
+            raise ValueError("target_delta must be non-negative when provided.")
+        if self.gap_enforcement_mode not in {"soft", "hard", "reject"}:
+            raise ValueError("gap_enforcement_mode must be one of {'soft', 'hard', 'reject'}.")
+        if self.max_rejection_attempts <= 0:
+            raise ValueError("max_rejection_attempts must be positive.")
         if self.arm_heterogeneity_mode not in ("uniform", "sparse", "clustered"):
             raise ValueError("arm_heterogeneity_mode must be one of {'uniform', 'sparse', 'clustered'}")
         if not (0.0 < self.sparse_fraction <= 1.0):
@@ -700,6 +715,70 @@ def build_random_scm(config: CausalBanditConfig, *, rng: Optional[np.random.Gene
         reward_parents=tuple(parents[reward_node]),
         reward_means=reward_means,
     )
+
+
+def build_random_scm_with_gaps(
+    config: CausalBanditConfig,
+    *,
+    rng: Optional[np.random.Generator] = None,
+    tol: float = 0.9,
+) -> Tuple[CausalBanditInstance, Dict[str, Any]]:
+    """
+    Construct a random SCM and (optionally) enforce target epsilon/delta gaps via rejection sampling.
+
+    Returns the instance and a diagnostics dictionary containing measured gaps and attempts.
+    """
+
+    rng = rng or config.rng()
+    if config.target_epsilon is None and config.target_delta is None:
+        return build_random_scm(config, rng=rng), {}
+
+    last_diag: Dict[str, Any] = {}
+    last_instance: Optional[CausalBanditInstance] = None
+    for attempt in range(1, config.max_rejection_attempts + 1):
+        # Disable hard_margin proxy when targeting gaps directly.
+        candidate_cfg = dataclasses.replace(config, hard_margin=0.0)
+        instance = build_random_scm(candidate_cfg, rng=rng)
+        gaps = instance.estimate_min_eps_delta(
+            max_parent_scope_exact=2,
+            n_mc=8000,
+            alpha=0.05,
+            max_hops=3,
+            rng=rng,
+        )
+        measured_eps = float(gaps.eps)
+        measured_delta = float(gaps.Delta)
+        eps_ok = config.target_epsilon is None or measured_eps >= config.target_epsilon * tol
+        delta_ok = config.target_delta is None or measured_delta >= config.target_delta * tol
+        diag = {
+            "measured_epsilon": measured_eps,
+            "measured_delta": measured_delta,
+            "attempts": attempt,
+            "gap_satisfied": bool(eps_ok and delta_ok),
+            "target_epsilon": config.target_epsilon,
+            "target_delta": config.target_delta,
+        }
+        last_diag = diag
+        last_instance = instance
+        if eps_ok and delta_ok:
+            return instance, diag
+        if config.gap_enforcement_mode == "soft":
+            # Accept but keep diagnostics to surface mismatch.
+            return instance, diag
+        if config.gap_enforcement_mode == "hard":
+            continue
+        # reject mode: keep looping until success or exhaustion
+
+    if config.gap_enforcement_mode == "hard":
+        raise ValueError(
+            f"Failed to satisfy gap targets after {config.max_rejection_attempts} attempts "
+            f"(last ε={last_diag.get('measured_epsilon', float('nan')):.4f}, "
+            f"Δ={last_diag.get('measured_delta', float('nan')):.4f}). "
+            "Relax targets or increase max_rejection_attempts."
+        )
+    if last_instance is None:
+        raise RuntimeError("Gap-targeted SCM generation failed unexpectedly.")
+    return last_instance, last_diag
 
 
 # ---------------------------------------------------------------------------

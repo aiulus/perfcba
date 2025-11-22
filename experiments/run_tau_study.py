@@ -33,6 +33,7 @@ from .causal_envs import (
     InterventionArm,
     InterventionSpace,
     build_random_scm,
+    build_random_scm_with_gaps,
 )
 from .exploit import ArmBuilder, HybridArmConfig, ParentAwareUCB
 from .grids import TAU_GRID, grid_values
@@ -56,6 +57,8 @@ KNOB_LABELS = {
     "algo_delta": ("Reward Gap Δ", "reward gaps"),
     "hard_margin": ("Hard Margin", "hard margins"),
     "tau": ("Tau Budget", "tau values"),
+    "reward_edge_density": ("Reward Edge Density", "reward edge densities"),
+    "covariate_edge_density": ("Covariate Edge Density", "covariate edge densities"),
 }
 
 METRIC_LABELS = {
@@ -343,11 +346,12 @@ def run_trial(
     if prepared is not None:
         instance = prepared.instance
         optimal_mean = prepared.optimal_mean
+        diagnostics = prepared.diagnostics or {}
         rng = np.random.default_rng()
         rng.bit_generator.state = copy.deepcopy(prepared.rng_state)
     else:
         rng = np.random.default_rng(seed)
-        instance = build_random_scm(base_cfg, rng=rng)
+        instance, diagnostics = build_random_scm_with_gaps(base_cfg, rng=rng)
         optimal_mean = compute_optimal_mean(instance, rng, mc_samples=sampling.optimal_mean_mc_samples)
     if structure_backend == "budgeted_raps":
         if raps_params is None:
@@ -425,12 +429,36 @@ def run_trial(
         "parent_recall": parent_recall,
         "hard_margin": float(instance.config.hard_margin),
         "graph_density": float(instance.config.edge_prob),
+        "edge_prob_covariates": float(
+            instance.config.edge_prob_covariates
+            if instance.config.edge_prob_covariates is not None
+            else instance.config.edge_prob
+        ),
+        "edge_prob_to_reward": float(
+            instance.config.edge_prob_to_reward
+            if instance.config.edge_prob_to_reward is not None
+            else instance.config.edge_prob
+        ),
         "node_count": int(instance.config.n),
         "parent_count": int(instance.config.k),
         "intervention_size": int(instance.config.m),
         "alphabet": int(instance.config.ell),
         "arm_variance": float(instance.config.reward_logit_scale),
+        "arm_heterogeneity_mode": instance.config.arm_heterogeneity_mode,
+        "sparse_fraction": float(instance.config.sparse_fraction),
+        "sparse_separation": float(instance.config.sparse_separation),
+        "cluster_count": int(instance.config.cluster_count),
+        "gap_enforcement_mode": instance.config.gap_enforcement_mode,
     }
+    if diagnostics:
+        record.update(
+            measured_epsilon=diagnostics.get("measured_epsilon"),
+            measured_delta=diagnostics.get("measured_delta"),
+            gap_attempts=diagnostics.get("attempts"),
+            gap_target_epsilon=diagnostics.get("target_epsilon"),
+            gap_target_delta=diagnostics.get("target_delta"),
+            gap_satisfied=diagnostics.get("gap_satisfied"),
+        )
     if structure_backend == "budgeted_raps" and raps_params is not None:
         record["algo_eps"] = raps_params.eps
         record["algo_delta"] = raps_params.Delta
@@ -550,6 +578,7 @@ class PreparedInstance:
     instance: CausalBanditInstance
     optimal_mean: float
     rng_state: Dict[str, Any]
+    diagnostics: Optional[Dict[str, Any]]
 
 
 def prepare_instance(
@@ -562,7 +591,7 @@ def prepare_instance(
     """Build the SCM, compute the optimal mean once, and record the RNG state."""
 
     rng = np.random.default_rng(seed)
-    instance = build_random_scm(cfg, rng=rng)
+    instance, diagnostics = build_random_scm_with_gaps(cfg, rng=rng)
     sampler_cache = SamplerCache() if enable_cache else None
     if sampler_cache is not None:
         instance = dataclasses.replace(instance, sampler_cache=sampler_cache)
@@ -574,6 +603,7 @@ def prepare_instance(
         instance=instance,
         optimal_mean=optimal_mean,
         rng_state=rng_state,
+        diagnostics=diagnostics,
     )
 
 
@@ -592,6 +622,8 @@ def parse_args() -> argparse.Namespace:
             "algo_eps",
             "algo_delta",
             "hard_margin",
+            "reward_edge_density",
+            "covariate_edge_density",
             "tau",
         ],
         required=True,
@@ -607,6 +639,8 @@ def parse_args() -> argparse.Namespace:
             "alphabet",
             "arm_variance",
             "hard_margin",
+            "reward_edge_density",
+            "covariate_edge_density",
         ],
         default=None,
         help="Optional secondary environment knob to sweep alongside the primary --vary.",
@@ -703,6 +737,72 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=0.0,
         help="Lower bound applied to reward-conditionals only (after --scm-epsilon).",
+    )
+    parser.add_argument(
+        "--edge-prob",
+        type=float,
+        default=None,
+        help="Override baseline edge probability for all edges (defaults to 2/n if not provided).",
+    )
+    parser.add_argument(
+        "--edge-prob-covariates",
+        type=float,
+        default=None,
+        help="Optional override for covariate edges X->X (falls back to --edge-prob or 2/n).",
+    )
+    parser.add_argument(
+        "--edge-prob-to-reward",
+        type=float,
+        default=None,
+        help="Optional override for reward edges X->Y (falls back to --edge-prob or 2/n).",
+    )
+    parser.add_argument(
+        "--arm-heterogeneity-mode",
+        choices=["uniform", "sparse", "clustered"],
+        default="uniform",
+        help="Reward heterogeneity structure.",
+    )
+    parser.add_argument(
+        "--sparse-fraction",
+        type=float,
+        default=0.1,
+        help="Fraction of special assignments when arm-heterogeneity-mode=sparse.",
+    )
+    parser.add_argument(
+        "--sparse-separation",
+        type=float,
+        default=0.3,
+        help="Minimum separation from the base mean for sparse special assignments.",
+    )
+    parser.add_argument(
+        "--cluster-count",
+        type=int,
+        default=3,
+        help="Number of clusters when arm-heterogeneity-mode=clustered.",
+    )
+    parser.add_argument(
+        "--target-epsilon",
+        type=float,
+        default=None,
+        help="Target ancestral gap ε for environment generation (optional).",
+    )
+    parser.add_argument(
+        "--target-delta",
+        type=float,
+        default=None,
+        help="Target reward gap Δ for environment generation (optional).",
+    )
+    parser.add_argument(
+        "--gap-enforcement-mode",
+        choices=["soft", "hard", "reject"],
+        default="soft",
+        help="Control acceptance when target gaps are not met: soft=accept with warning, hard=error after retries, reject=keep trying until max attempts then accept best.",
+    )
+    parser.add_argument(
+        "--max-rejection-attempts",
+        type=int,
+        default=128,
+        help="Maximum attempts for gap-targeted SCM generation.",
     )
     parser.add_argument("--seeds", type=str, default="0:9", help="Seed range start:end.")
     parser.add_argument(
@@ -978,18 +1078,30 @@ def main() -> None:
     seed_start, seed_end = map(int, args.seeds.split(":"))
     seeds = list(range(seed_start, seed_end + 1))
     m_value = args.m if args.m is not None else args.k
+    edge_prob_user = args.edge_prob is not None
+    base_edge_prob = args.edge_prob if args.edge_prob is not None else 2.0 / max(1, args.n)
     base_cfg = CausalBanditConfig(
         n=args.n,
         ell=args.ell,
         k=args.k,
         m=m_value,
-        edge_prob=2.0 / max(1, args.n),
+        edge_prob=base_edge_prob,
+        edge_prob_covariates=args.edge_prob_covariates,
+        edge_prob_to_reward=args.edge_prob_to_reward,
         scm_mode=args.scm_mode,
         parent_effect=args.parent_effect,
         reward_logit_scale=args.reward_logit_scale,
         hard_margin=base_hard_margin,
         scm_epsilon=args.scm_epsilon,
         scm_delta=args.scm_delta,
+        arm_heterogeneity_mode=args.arm_heterogeneity_mode,
+        sparse_fraction=args.sparse_fraction,
+        sparse_separation=args.sparse_separation,
+        cluster_count=args.cluster_count,
+        target_epsilon=args.target_epsilon,
+        target_delta=args.target_delta,
+        gap_enforcement_mode=args.gap_enforcement_mode,
+        max_rejection_attempts=args.max_rejection_attempts,
     )
     budget_warning_cache: set[Tuple[int, int]] = set()
     base_algo_eps = args.algo_eps
@@ -997,6 +1109,10 @@ def main() -> None:
     if args.vary == "parent_count" and args.parent_grid:
         knob_values = [int(value) for value in args.parent_grid]
     elif args.vary == "graph_density" and args.graph_grid:
+        knob_values = [float(value) for value in args.graph_grid]
+    elif args.vary == "reward_edge_density" and args.graph_grid:
+        knob_values = [float(value) for value in args.graph_grid]
+    elif args.vary == "covariate_edge_density" and args.graph_grid:
         knob_values = [float(value) for value in args.graph_grid]
     elif args.vary == "node_count" and args.node_grid:
         knob_values = [int(value) for value in args.node_grid]
@@ -1010,6 +1126,8 @@ def main() -> None:
         if hard_margin_values is None:
             raise ValueError("No hard-margin values provided.")
         knob_values = [float(value) for value in hard_margin_values]
+    elif args.vary in {"reward_edge_density", "covariate_edge_density"}:
+        raise ValueError(f"Provide --graph-grid when varying {args.vary}.")
     elif args.vary == "tau":
         knob_values = [float(value) for value in args.tau_grid]
     else:
@@ -1074,16 +1192,21 @@ def main() -> None:
         tau_override: Optional[List[float]] = None
         if vary == "graph_density":
             cfg = dataclasses.replace(cfg, edge_prob=float(value))
+        elif vary == "reward_edge_density":
+            cfg = dataclasses.replace(cfg, edge_prob_to_reward=float(value))
+        elif vary == "covariate_edge_density":
+            cfg = dataclasses.replace(cfg, edge_prob_covariates=float(value))
         elif vary == "node_count":
             new_n = int(value)
             if new_n < cfg.k:
                 raise ValueError(f"node_count grid value {new_n} must be >= k={cfg.k}")
             new_m = min(cfg.m, new_n)
+            new_edge_prob = cfg.edge_prob if edge_prob_user else 2.0 / max(1, new_n)
             cfg = dataclasses.replace(
                 cfg,
                 n=new_n,
                 m=new_m,
-                edge_prob=2.0 / max(1, new_n),
+                edge_prob=new_edge_prob,
             )
         elif vary == "parent_count":
             new_k = int(value)
@@ -1093,7 +1216,10 @@ def main() -> None:
         elif vary == "alphabet":
             cfg = dataclasses.replace(cfg, ell=int(value))
         elif vary == "arm_variance":
-            cfg = dataclasses.replace(cfg, reward_logit_scale=float(value))
+            if cfg.arm_heterogeneity_mode == "sparse":
+                cfg = dataclasses.replace(cfg, sparse_fraction=float(value))
+            else:
+                cfg = dataclasses.replace(cfg, reward_logit_scale=float(value))
         elif vary == "hard_margin":
             cfg = dataclasses.replace(cfg, hard_margin=float(value))
         elif vary == "horizon":
