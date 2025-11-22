@@ -39,6 +39,12 @@ def parse_args() -> argparse.Namespace:
     # Parse num-workers first, forward the rest to the existing parser.
     parser = argparse.ArgumentParser(description="Parallel tau study")
     parser.add_argument("--num-workers", type=int, default=1, help="Parallel workers (default: 1=serial).")
+    parser.add_argument(
+        "--executor",
+        choices=["process", "thread"],
+        default="process",
+        help="Executor type for parallelism (default: process). Use 'thread' if pickling causes issues on Windows.",
+    )
     # We reuse the original parser for all other args.
     from .run_tau_study import parse_args as base_parse
 
@@ -312,7 +318,12 @@ def main() -> None:
     progress.close()
 
     # Execute in pool.
-    results_map = run_jobs_in_pool(jobs, num_workers=args.num_workers, show_progress=True)
+    results_map = run_jobs_in_pool(
+        jobs,
+        num_workers=args.num_workers,
+        show_progress=True,
+        executor=getattr(args, "executor", "process"),
+    )
 
     # Aggregate records.
     records: List[Dict[str, Any]] = []

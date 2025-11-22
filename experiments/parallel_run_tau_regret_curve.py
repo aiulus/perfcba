@@ -34,6 +34,12 @@ from .structure import compute_effect_threshold
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Parallel regret-curve runner.")
     parser.add_argument("--num-workers", type=int, default=1, help="Parallel workers (default: 1).")
+    parser.add_argument(
+        "--executor",
+        choices=["process", "thread"],
+        default="process",
+        help="Executor type for parallelism (default: process). Use 'thread' if pickling causes issues on Windows.",
+    )
     # reuse most args from run_tau_regret_curve
     base_parser = argparse.ArgumentParser(add_help=False)
     from .run_tau_regret_curve import parse_args as base_parse
@@ -140,7 +146,12 @@ def main() -> None:
         )
         jobs.append((str(seed), fn))
     # Execute and collect records directly; no artifact reuse to simplify.
-    results_map = run_jobs_in_pool(jobs, num_workers=args.num_workers, show_progress=True)
+    results_map = run_jobs_in_pool(
+        jobs,
+        num_workers=args.num_workers,
+        show_progress=True,
+        executor=getattr(args, "executor", "process"),
+    )
 
     artifacts = []
     for seed in seeds:

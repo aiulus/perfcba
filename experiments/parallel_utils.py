@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -21,6 +21,7 @@ def run_jobs_in_pool(
     num_workers: int,
     *,
     show_progress: bool = False,
+    executor: str = "process",
 ) -> Dict[str, Any]:
     """Run callables in a process pool; returns a map from job id to result."""
 
@@ -30,8 +31,9 @@ def run_jobs_in_pool(
             results[job_id] = fn()
         return results
 
+    ExecutorCls = ProcessPoolExecutor if executor == "process" else ThreadPoolExecutor
     progress = tqdm(total=len(jobs), desc="Parallel jobs", unit="job", disable=not show_progress)
-    with ProcessPoolExecutor(max_workers=num_workers) as ex:
+    with ExecutorCls(max_workers=num_workers) as ex:
         future_map = {ex.submit(fn): job_id for job_id, fn in jobs}
         for fut in as_completed(future_map):
             job_id = future_map[fut]
