@@ -667,6 +667,20 @@ def parse_args() -> argparse.Namespace:
         help="Override edge probabilities when --vary graph_density is used (accepts start[:step]:stop ranges).",
     )
     parser.add_argument(
+        "--sparse-fraction-grid",
+        type=str,
+        nargs="+",
+        default=None,
+        help="Override sparse fractions when sweeping arm heterogeneity in sparse mode (accepts start[:step]:stop ranges).",
+    )
+    parser.add_argument(
+        "--cluster-count-grid",
+        type=str,
+        nargs="+",
+        default=None,
+        help="Override cluster counts when sweeping arm heterogeneity in clustered mode (accepts start[:step]:stop ranges).",
+    )
+    parser.add_argument(
         "--node-grid",
         type=str,
         nargs="+",
@@ -1048,6 +1062,8 @@ def main() -> None:
         raise ValueError("--effect-threshold requires --effect-threshold-mode=fixed.")
     args.parent_grid = _parse_grid_tokens(args.parent_grid, int)
     args.graph_grid = _parse_grid_tokens(args.graph_grid, float)
+    args.sparse_fraction_grid = _parse_grid_tokens(args.sparse_fraction_grid, float)
+    args.cluster_count_grid = _parse_grid_tokens(args.cluster_count_grid, int)
     args.node_grid = _parse_grid_tokens(args.node_grid, int)
     args.intervention_grid = _parse_grid_tokens(args.intervention_grid, int)
     args.algo_eps_grid = _parse_grid_tokens(args.algo_eps_grid, float)
@@ -1122,6 +1138,13 @@ def main() -> None:
         knob_values = [float(value) for value in args.algo_eps_grid]
     elif args.vary == "algo_delta" and args.algo_delta_grid:
         knob_values = [float(value) for value in args.algo_delta_grid]
+    elif args.vary == "arm_variance":
+        if args.arm_heterogeneity_mode == "sparse" and args.sparse_fraction_grid:
+            knob_values = [float(value) for value in args.sparse_fraction_grid]
+        elif args.arm_heterogeneity_mode == "clustered" and args.cluster_count_grid:
+            knob_values = [int(value) for value in args.cluster_count_grid]
+        else:
+            knob_values = grid_values(args.vary, n=args.n, k=args.k)
     elif args.vary == "hard_margin":
         if hard_margin_values is None:
             raise ValueError("No hard-margin values provided.")
@@ -1201,13 +1224,22 @@ def main() -> None:
             if new_n < cfg.k:
                 raise ValueError(f"node_count grid value {new_n} must be >= k={cfg.k}")
             new_m = min(cfg.m, new_n)
-            new_edge_prob = cfg.edge_prob if edge_prob_user else 2.0 / max(1, new_n)
-            cfg = dataclasses.replace(
-                cfg,
-                n=new_n,
-                m=new_m,
-                edge_prob=new_edge_prob,
-            )
+            if edge_prob_user:
+                cfg = dataclasses.replace(cfg, n=new_n, m=new_m)
+            else:
+                new_edge_prob = 2.0 / max(1, new_n)
+                new_cov_density = (
+                    args.edge_prob_covariates if args.edge_prob_covariates is not None else new_edge_prob
+                )
+                new_rew_density = args.edge_prob_to_reward if args.edge_prob_to_reward is not None else new_edge_prob
+                cfg = dataclasses.replace(
+                    cfg,
+                    n=new_n,
+                    m=new_m,
+                    edge_prob=new_edge_prob,
+                    edge_prob_covariates=new_cov_density,
+                    edge_prob_to_reward=new_rew_density,
+                )
         elif vary == "parent_count":
             new_k = int(value)
             cfg = dataclasses.replace(cfg, k=new_k, m=max(new_k, cfg.m))
@@ -1218,6 +1250,8 @@ def main() -> None:
         elif vary == "arm_variance":
             if cfg.arm_heterogeneity_mode == "sparse":
                 cfg = dataclasses.replace(cfg, sparse_fraction=float(value))
+            elif cfg.arm_heterogeneity_mode == "clustered":
+                cfg = dataclasses.replace(cfg, cluster_count=int(value))
             else:
                 cfg = dataclasses.replace(cfg, reward_logit_scale=float(value))
         elif vary == "hard_margin":

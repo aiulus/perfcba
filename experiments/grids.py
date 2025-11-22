@@ -46,6 +46,8 @@ GRIDS = {
     "algo_eps": [0.01, 0.02, 0.05, 0.1],
     "algo_delta": [0.01, 0.03, 0.05, 0.1],
     "hard_margin": [0.0, 0.05, 0.1, 0.2],
+    "reward_edge_density": lambda n, k: [min(1.0, float(v)) for v in (2 / n, 4 / n, 0.3, 0.5, 1.0)],
+    "covariate_edge_density": lambda n, k: [min(1.0, float(v)) for v in (1 / n, 2 / n, np.log(n) / n, 0.3, 0.5)],
     "tau": TAU_GRID,
 }
 
@@ -63,4 +65,6 @@ def grid_values(name: str, *, n: int, k: int) -> Sequence[float]:
             return grid(n)
         if name == "intervention_size":
             return grid(k, n)
+        if name in {"reward_edge_density", "covariate_edge_density"}:
+            return grid(n, k)
     return grid
