@@ -1367,14 +1367,14 @@ def main() -> None:
                         else:
                             prepared_instance = prepared_cache.get(cache_key)
                             if prepared_instance is None:
-                            prepared_instance = prepare_instance(
-                                cfg,
-                                seed,
-                                enable_cache=cache_enabled,
-                                sampling=sampling,
-                                measure_gaps=bool(args.measure_gaps),
-                            )
-                            prepared_cache[cache_key] = prepared_instance
+                                prepared_instance = prepare_instance(
+                                    cfg,
+                                    seed,
+                                    enable_cache=cache_enabled,
+                                    sampling=sampling,
+                                    measure_gaps=bool(args.measure_gaps),
+                                )
+                                prepared_cache[cache_key] = prepared_instance
                             record, summary, optimal_mean = run_trial(
                                 base_cfg=cfg,
                                 horizon=current_horizon,
