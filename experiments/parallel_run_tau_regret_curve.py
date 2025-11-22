@@ -17,7 +17,9 @@ from .artifacts import (
     write_trial_artifact,
 )
 from .causal_envs import CausalBanditConfig
-from .parallel_utils import run_jobs_in_pool
+from functools import partial
+
+from .parallel_utils import run_jobs_in_pool, run_trial_worker
 from .regret_curves import aggregate_regret_curves, plot_regret_band
 from .run_tau_study import (
     SamplingSettings,
@@ -117,73 +119,38 @@ def main() -> None:
     artifact_dir: Path = args.artifact_dir
     artifact_dir.mkdir(parents=True, exist_ok=True)
 
-    def make_job(seed: int):
-        def _fn():
-            record, summary, optimal_mean = run_trial(
-                base_cfg=cfg,
-                horizon=horizon,
-                tau=args.tau,
-                seed=seed,
-                knob_value=float(args.knob_value if hasattr(args, "knob_value") else 0.0),
-                subset_size=subset_size,
-                scheduler_mode=args.scheduler,
-                use_full_budget=args.etc_use_full_budget,
-                effect_threshold=effect_threshold_value,
-                sampling=sampling,
-                adaptive_config=adaptive_cfg,
-                structure_backend="budgeted_raps" if args.scheduler == "budgeted_raps" else args.scheduler,
-                raps_params=None,
-                arm_builder_cfg=None,
-                prepared=None,
-                measure_gaps=bool(args.measure_gaps),
-            )
-            identity = make_trial_identity(
-                cfg,
-                horizon=horizon,
-                tau=float(args.tau),
-                seed=seed,
-                knob_value=float(args.knob_value if hasattr(args, "knob_value") else 0.0),
-                scheduler=args.scheduler,
-                subset_size=subset_size,
-                use_full_budget=args.etc_use_full_budget,
-                effect_threshold=effect_threshold_value,
-                min_samples=sampling.min_samples,
-                adaptive_config=adaptive_cfg_dict,
-                structure_mc_samples=sampling.structure_mc_samples,
-                arm_mc_samples=sampling.arm_mc_samples,
-                optimal_mean_mc_samples=sampling.optimal_mean_mc_samples,
-            )
-            record = enrich_record_with_metadata(
-                record,
-                summary=summary,
-                identity=identity,
-                horizon=horizon,
-                scheduler=args.scheduler,
-            )
-            metadata = build_metadata(cli_args={**cli_args_snapshot, "seed": seed})
-            trial_artifact = TrialArtifact(
-                identity=identity,
-                record=record,
-                summary=summary,
-                optimal_mean=optimal_mean,
-                metadata=metadata,
-            )
-            write_trial_artifact(artifact_dir, trial_artifact)
-            return trial_artifact
-
-        return _fn
-
-    jobs = [(str(seed), make_job(seed)) for seed in seeds]
-    _ = run_jobs_in_pool(jobs, num_workers=args.num_workers)
+    jobs = []
+    for seed in seeds:
+        fn = partial(
+            run_trial_worker,
+            cfg=cfg,
+            horizon=horizon,
+            tau=args.tau,
+            seed=seed,
+            knob_value=float(getattr(args, "knob_value", 0.0)),
+            subset_size=subset_size,
+            scheduler_mode=args.scheduler,
+            use_full_budget=args.etc_use_full_budget,
+            effect_threshold=effect_threshold_value,
+            sampling=sampling,
+            adaptive_config=adaptive_cfg,
+            structure_backend="budgeted_raps" if args.scheduler == "budgeted_raps" else args.scheduler,
+            raps_params=None,
+            arm_builder_cfg=None,
+        )
+        jobs.append((str(seed), fn))
+    # Execute and collect records directly; no artifact reuse to simplify.
+    results_map = run_jobs_in_pool(jobs, num_workers=args.num_workers)
 
     artifacts = []
     for seed in seeds:
+        record, summary, optimal_mean = results_map[str(seed)]
         identity = make_trial_identity(
             cfg,
             horizon=horizon,
             tau=float(args.tau),
             seed=seed,
-            knob_value=float(args.knob_value if hasattr(args, "knob_value") else 0.0),
+            knob_value=float(getattr(args, "knob_value", 0.0)),
             scheduler=args.scheduler,
             subset_size=subset_size,
             use_full_budget=args.etc_use_full_budget,
@@ -194,9 +161,22 @@ def main() -> None:
             arm_mc_samples=sampling.arm_mc_samples,
             optimal_mean_mc_samples=sampling.optimal_mean_mc_samples,
         )
-        artifact = load_trial_artifact(artifact_dir, identity)
-        if artifact is None:
-            raise FileNotFoundError(f"Missing artifact for seed {seed} in {artifact_dir}")
+        record = enrich_record_with_metadata(
+            record,
+            summary=summary,
+            identity=identity,
+            horizon=horizon,
+            scheduler=args.scheduler,
+        )
+        metadata = build_metadata(cli_args={**cli_args_snapshot, "seed": seed})
+        artifact = TrialArtifact(
+            identity=identity,
+            record=record,
+            summary=summary,
+            optimal_mean=optimal_mean,
+            metadata=metadata,
+        )
+        write_trial_artifact(artifact_dir, artifact)
         artifacts.append(artifact)
 
     xs, mean, std, matrix = aggregate_regret_curves(artifacts)

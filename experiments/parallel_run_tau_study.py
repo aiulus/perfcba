@@ -15,7 +15,10 @@ from tqdm.auto import tqdm
 
 from . import grids
 from .causal_envs import CausalBanditConfig
-from .parallel_utils import build_trial_callable, run_jobs_in_pool
+from functools import partial
+
+from .parallel_utils import run_jobs_in_pool, run_trial_worker
+from ..causal_bandits import RAPSParams
 from .run_tau_study import (
     KNOB_LABELS,
     METRIC_LABELS,
@@ -30,7 +33,6 @@ from .run_tau_study import (
     report_heatmap_std,
     subset_size_for_known_k,
 )
-from .structure import RAPSParams
 
 
 def parse_args() -> argparse.Namespace:
@@ -146,6 +148,15 @@ def main() -> None:
     m_value = args.m if args.m is not None else args.k
     edge_prob_user = args.edge_prob is not None
     base_edge_prob = args.edge_prob if args.edge_prob is not None else 2.0 / max(1, args.n)
+    # Mirror hard_margin handling from run_tau_study.
+    if args.hard_margin is None:
+        base_hard_margin = 0.0
+    elif len(args.hard_margin) == 0:
+        base_hard_margin = 0.1
+    else:
+        if len(args.hard_margin) != 1:
+            raise ValueError("Specify a single --hard-margin value when not varying hard_margin.")
+        base_hard_margin = float(args.hard_margin[0])
     base_cfg = CausalBanditConfig(
         n=args.n,
         ell=args.ell,
@@ -157,7 +168,7 @@ def main() -> None:
         scm_mode=args.scm_mode,
         parent_effect=args.parent_effect,
         reward_logit_scale=args.reward_logit_scale,
-        hard_margin=args.hard_margin,
+        hard_margin=base_hard_margin,
         scm_epsilon=args.scm_epsilon,
         scm_delta=args.scm_delta,
         arm_heterogeneity_mode=args.arm_heterogeneity_mode,
@@ -279,7 +290,8 @@ def main() -> None:
             for tau in tau_iter:
                 for seed in seeds:
                     job_id = f"{env_value}_{knob_value}_{tau}_{seed}"
-                    fn = build_trial_callable(
+                    fn = partial(
+                        run_trial_worker,
                         cfg=cfg,
                         horizon=current_horizon,
                         tau=tau,
@@ -294,7 +306,6 @@ def main() -> None:
                         structure_backend=args.structure_backend,  # type: ignore[arg-type]
                         raps_params=raps_params_for_knob,
                         arm_builder_cfg=arm_builder_cfg,
-                        cache_enabled=False,
                     )
                     jobs.append((job_id, fn))
                 progress.update(len(seeds))
