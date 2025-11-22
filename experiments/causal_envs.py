@@ -723,6 +723,7 @@ def build_random_scm_with_gaps(
     rng: Optional[np.random.Generator] = None,
     tol: float = 0.9,
     measure_when_no_target: bool = False,
+    enforce_targets: bool = True,
 ) -> Tuple[CausalBanditInstance, Dict[str, Any]]:
     """
     Construct a random SCM and (optionally) enforce target epsilon/delta gaps via rejection sampling.
@@ -731,9 +732,10 @@ def build_random_scm_with_gaps(
     """
 
     rng = rng or config.rng()
-    if config.target_epsilon is None and config.target_delta is None:
+    targets_present = config.target_epsilon is not None or config.target_delta is not None
+    if (not targets_present) or not enforce_targets:
         instance = build_random_scm(config, rng=rng)
-        if not measure_when_no_target:
+        if not measure_when_no_target and not targets_present:
             return instance, {}
         gaps = instance.estimate_min_eps_delta(
             max_parent_scope_exact=2,
@@ -747,8 +749,8 @@ def build_random_scm_with_gaps(
             "measured_delta": float(gaps.Delta),
             "attempts": 1,
             "gap_satisfied": None,
-            "target_epsilon": None,
-            "target_delta": None,
+            "target_epsilon": config.target_epsilon if targets_present else None,
+            "target_delta": config.target_delta if targets_present else None,
         }
 
     last_diag: Dict[str, Any] = {}

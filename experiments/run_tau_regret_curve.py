@@ -9,6 +9,7 @@ import math
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from ..causal_bandits import RAPSParams
 from .artifacts import (
     TrialArtifact,
     build_metadata,
@@ -21,8 +22,11 @@ from .regret_curves import aggregate_regret_curves, plot_regret_band
 from .run_tau_study import (
     adaptive_config_from_args,
     enrich_record_with_metadata,
+    prepare_instance,
     run_trial,
     SamplingSettings,
+    _center_grid_value,
+    _grid_center,
     subset_size_for_known_k,
 )
 from .structure import compute_effect_threshold
@@ -144,6 +148,48 @@ def parse_args() -> argparse.Namespace:
         default=False,
         help="If set, measure and log gaps even when target-epsilon/target-delta are not provided.",
     )
+    parser.add_argument(
+        "--center-algo-grids-on-true-gaps",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Sample SCMs without enforcing gap targets, measure true gaps, and shift algo_eps/algo_delta so measured gaps align with the nominal values.",
+    )
+    parser.add_argument(
+        "--grid-center-min",
+        type=float,
+        default=1e-4,
+        help="Lower bound applied when centering algo params on measured gaps.",
+    )
+    parser.add_argument(
+        "--grid-center-max",
+        type=float,
+        default=0.5,
+        help="Upper bound applied when centering algo params on measured gaps.",
+    )
+    parser.add_argument(
+        "--algo-eps",
+        type=float,
+        default=0.05,
+        help="Epsilon parameter for the budgeted RAPS backend.",
+    )
+    parser.add_argument(
+        "--algo-delta",
+        type=float,
+        default=0.05,
+        help="Reward-gap parameter (Δ) for the budgeted RAPS backend.",
+    )
+    parser.add_argument(
+        "--raps-delta",
+        type=float,
+        default=0.05,
+        help="Confidence parameter δ for the budgeted RAPS backend.",
+    )
+    parser.add_argument(
+        "--structure-backend",
+        choices=["proxy", "budgeted_raps"],
+        default="budgeted_raps",
+        help="Selects the structure learner: 'proxy' uses RAPSLearner, 'budgeted_raps' reuses the official implementation.",
+    )
     parser.add_argument("--T", type=int, default=10_000, help="Horizon length.")
     parser.add_argument("--tau", type=float, required=True, help="Tau budget for structure learning.")
     parser.add_argument("--knob-value", type=float, default=0.0, help="Metadata label recorded in artifacts.")
@@ -261,9 +307,46 @@ def ensure_artifacts(
     adaptive_cfg_dict: Optional[Dict[str, object]],
     artifact_dir: Path,
     cli_args_snapshot: Dict[str, object],
+    center_algo_grids: bool,
+    enforce_gap_targets: bool,
+    measure_gaps_flag: bool,
+    base_algo_eps: float,
+    base_algo_delta: float,
+    raps_delta: float,
+    grid_center_min: float,
+    grid_center_max: float,
+    structure_backend: str,
 ) -> None:
     artifact_dir.mkdir(parents=True, exist_ok=True)
     for seed in seeds:
+        prepared_instance = prepare_instance(
+            cfg,
+            seed,
+            enable_cache=True,
+            sampling=sampling,
+            measure_gaps=measure_gaps_flag,
+            enforce_gap_targets=enforce_gap_targets,
+        )
+        diagnostics = prepared_instance.diagnostics or {}
+        measured_eps = diagnostics.get("measured_epsilon")
+        measured_delta = diagnostics.get("measured_delta")
+        resolved_eps = _center_grid_value(
+            base_algo_eps,
+            measured_eps,
+            template_center=_grid_center([base_algo_eps], base_algo_eps),
+            lower=grid_center_min,
+            upper=grid_center_max,
+        ) if center_algo_grids else base_algo_eps
+        resolved_delta = _center_grid_value(
+            base_algo_delta,
+            measured_delta,
+            template_center=_grid_center([base_algo_delta], base_algo_delta),
+            lower=grid_center_min,
+            upper=grid_center_max,
+        ) if center_algo_grids else base_algo_delta
+        raps_params_for_run: Optional[RAPSParams] = None
+        if structure_backend == "budgeted_raps":
+            raps_params_for_run = RAPSParams(eps=resolved_eps, Delta=resolved_delta, delta=raps_delta)
         identity = make_trial_identity(
             cfg,
             horizon=horizon,
@@ -271,11 +354,13 @@ def ensure_artifacts(
             seed=seed,
             knob_value=float(knob_value),
             scheduler=scheduler,
+            structure_backend=structure_backend,
             subset_size=subset_size,
             use_full_budget=use_full_budget,
             effect_threshold=effect_threshold,
             min_samples=sampling.min_samples,
             adaptive_config=adaptive_cfg_dict,
+            raps_params=dataclasses.asdict(raps_params_for_run) if raps_params_for_run is not None else None,
             structure_mc_samples=sampling.structure_mc_samples,
             arm_mc_samples=sampling.arm_mc_samples,
             optimal_mean_mc_samples=sampling.optimal_mean_mc_samples,
@@ -295,8 +380,17 @@ def ensure_artifacts(
             effect_threshold=effect_threshold,
             sampling=sampling,
             adaptive_config=adaptive_cfg,
-            measure_gaps=bool(cli_args_snapshot.get("measure_gaps", False)),
+            structure_backend=structure_backend,
+            raps_params=raps_params_for_run,
+            arm_builder_cfg=None,
+            prepared=prepared_instance,
+            measure_gaps=measure_gaps_flag,
+            enforce_gap_targets=enforce_gap_targets,
         )
+        if center_algo_grids:
+            record["algo_grid_centered_on_true_gaps"] = True
+            record["resolved_algo_eps"] = resolved_eps
+            record["resolved_algo_delta"] = resolved_delta
         record = enrich_record_with_metadata(
             record,
             summary=summary,
@@ -334,9 +428,46 @@ def load_artifacts_for_seeds(
     sampling: SamplingSettings,
     adaptive_cfg_dict: Optional[Dict[str, object]],
     artifact_dir: Path,
+    center_algo_grids: bool,
+    enforce_gap_targets: bool,
+    measure_gaps_flag: bool,
+    base_algo_eps: float,
+    base_algo_delta: float,
+    raps_delta: float,
+    grid_center_min: float,
+    grid_center_max: float,
+    structure_backend: str,
 ) -> List[TrialArtifact]:
     artifacts: List[TrialArtifact] = []
     for seed in seeds:
+        prepared_instance = prepare_instance(
+            cfg,
+            seed,
+            enable_cache=True,
+            sampling=sampling,
+            measure_gaps=measure_gaps_flag,
+            enforce_gap_targets=enforce_gap_targets,
+        )
+        diagnostics = prepared_instance.diagnostics or {}
+        measured_eps = diagnostics.get("measured_epsilon")
+        measured_delta = diagnostics.get("measured_delta")
+        resolved_eps = _center_grid_value(
+            base_algo_eps,
+            measured_eps,
+            template_center=_grid_center([base_algo_eps], base_algo_eps),
+            lower=grid_center_min,
+            upper=grid_center_max,
+        ) if center_algo_grids else base_algo_eps
+        resolved_delta = _center_grid_value(
+            base_algo_delta,
+            measured_delta,
+            template_center=_grid_center([base_algo_delta], base_algo_delta),
+            lower=grid_center_min,
+            upper=grid_center_max,
+        ) if center_algo_grids else base_algo_delta
+        raps_params_for_run: Optional[RAPSParams] = None
+        if structure_backend == "budgeted_raps":
+            raps_params_for_run = RAPSParams(eps=resolved_eps, Delta=resolved_delta, delta=raps_delta)
         identity = make_trial_identity(
             cfg,
             horizon=horizon,
@@ -344,11 +475,13 @@ def load_artifacts_for_seeds(
             seed=seed,
             knob_value=float(knob_value),
             scheduler=scheduler,
+            structure_backend=structure_backend,
             subset_size=subset_size,
             use_full_budget=use_full_budget,
             effect_threshold=effect_threshold,
             min_samples=sampling.min_samples,
             adaptive_config=adaptive_cfg_dict,
+            raps_params=dataclasses.asdict(raps_params_for_run) if raps_params_for_run is not None else None,
             structure_mc_samples=sampling.structure_mc_samples,
             arm_mc_samples=sampling.arm_mc_samples,
             optimal_mean_mc_samples=sampling.optimal_mean_mc_samples,
@@ -366,6 +499,8 @@ def main() -> None:
     args = parse_args()
     if args.effect_threshold is not None and args.effect_threshold_mode != "fixed":
         raise ValueError("--effect-threshold requires --effect-threshold-mode=fixed.")
+    if args.grid_center_min >= args.grid_center_max:
+        raise ValueError("--grid-center-min must be less than --grid-center-max.")
     seed_start, seed_end = map(int, args.seeds.split(":"))
     seeds = list(range(seed_start, seed_end + 1))
     if not seeds:
@@ -395,6 +530,11 @@ def main() -> None:
         gap_enforcement_mode=args.gap_enforcement_mode,
         max_rejection_attempts=args.max_rejection_attempts,
     )
+    center_algo_grids = bool(args.center_algo_grids_on_true_gaps)
+    enforce_gap_targets = not center_algo_grids
+    measure_gaps_flag = bool(args.measure_gaps or center_algo_grids)
+    base_algo_eps = float(args.algo_eps)
+    base_algo_delta = float(args.algo_delta)
     horizon = args.T
     subset_size = subset_size_for_known_k(cfg, horizon)
     adaptive_cfg = adaptive_config_from_args(args, horizon)
@@ -445,6 +585,15 @@ def main() -> None:
             adaptive_cfg_dict=adaptive_cfg_dict,
             artifact_dir=args.artifact_dir,
             cli_args_snapshot=cli_args_snapshot,
+            center_algo_grids=center_algo_grids,
+            enforce_gap_targets=enforce_gap_targets,
+            measure_gaps_flag=measure_gaps_flag,
+            base_algo_eps=base_algo_eps,
+            base_algo_delta=base_algo_delta,
+            raps_delta=args.raps_delta,
+            grid_center_min=args.grid_center_min,
+            grid_center_max=args.grid_center_max,
+            structure_backend=args.structure_backend,
         )
 
     artifacts = load_artifacts_for_seeds(
@@ -460,6 +609,15 @@ def main() -> None:
         sampling=sampling,
         adaptive_cfg_dict=adaptive_cfg_dict,
         artifact_dir=args.artifact_dir,
+        center_algo_grids=center_algo_grids,
+        enforce_gap_targets=enforce_gap_targets,
+        measure_gaps_flag=measure_gaps_flag,
+        base_algo_eps=base_algo_eps,
+        base_algo_delta=base_algo_delta,
+        raps_delta=args.raps_delta,
+        grid_center_min=args.grid_center_min,
+        grid_center_max=args.grid_center_max,
+        structure_backend=args.structure_backend,
     )
     xs, mean, std, matrix = aggregate_regret_curves(artifacts)
     plot_path = args.plot_path or (args.artifact_dir / "regret_curve.png")

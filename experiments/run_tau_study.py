@@ -253,6 +253,26 @@ def _cast_grid_value(value: float, caster: Callable[[str], Any]) -> Any:
     return caster(str(value))
 
 
+def _grid_center(values: Sequence[float], default: float) -> float:
+    if not values:
+        return float(default)
+    return float(np.median(np.asarray(values, dtype=float)))
+
+
+def _center_grid_value(
+    template_value: float,
+    measured_value: Optional[float],
+    *,
+    template_center: float,
+    lower: float,
+    upper: float,
+) -> float:
+    if measured_value is None or math.isnan(float(measured_value)):
+        return float(template_value)
+    shifted = float(template_value) + (float(measured_value) - float(template_center))
+    return float(min(upper, max(lower, shifted)))
+
+
 def _expand_range(token: str, caster: Callable[[str], Any]) -> List[Any]:
     parts = token.split(":")
     if len(parts) == 2:
@@ -343,6 +363,7 @@ def run_trial(
     arm_builder_cfg: Optional[HybridArmConfig] = None,
     prepared: Optional[PreparedInstance] = None,
     measure_gaps: bool = False,
+    enforce_gap_targets: bool = True,
 ) -> Tuple[Dict[str, Any], RunSummary, float]:
     if prepared is not None:
         instance = prepared.instance
@@ -356,6 +377,7 @@ def run_trial(
             base_cfg,
             rng=rng,
             measure_when_no_target=measure_gaps,
+            enforce_targets=enforce_gap_targets,
         )
         optimal_mean = compute_optimal_mean(instance, rng, mc_samples=sampling.optimal_mean_mc_samples)
     if structure_backend == "budgeted_raps":
@@ -592,7 +614,8 @@ def prepare_instance(
     *,
     enable_cache: bool,
     sampling: SamplingSettings,
-    measure_gaps: bool,
+    measure_gaps: bool = False,
+    enforce_gap_targets: bool = True,
 ) -> PreparedInstance:
     """Build the SCM, compute the optimal mean once, and record the RNG state."""
 
@@ -601,6 +624,7 @@ def prepare_instance(
         cfg,
         rng=rng,
         measure_when_no_target=measure_gaps,
+        enforce_targets=enforce_gap_targets,
     )
     sampler_cache = SamplerCache() if enable_cache else None
     if sampler_cache is not None:
@@ -833,6 +857,24 @@ def parse_args() -> argparse.Namespace:
         action=argparse.BooleanOptionalAction,
         default=False,
         help="If set, measure and log gaps even when target-epsilon/target-delta are not provided.",
+    )
+    parser.add_argument(
+        "--center-algo-grids-on-true-gaps",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Sample SCMs without enforcing gap targets, measure true gaps, and shift algo_eps/algo_delta grids so the measured gaps align with the grid center.",
+    )
+    parser.add_argument(
+        "--grid-center-min",
+        type=float,
+        default=1e-4,
+        help="Lower bound applied when centering algo grids on measured gaps.",
+    )
+    parser.add_argument(
+        "--grid-center-max",
+        type=float,
+        default=0.5,
+        help="Upper bound applied when centering algo grids on measured gaps.",
     )
     parser.add_argument("--seeds", type=str, default="0:9", help="Seed range start:end.")
     parser.add_argument(
@@ -1076,6 +1118,8 @@ def main() -> None:
     args = parse_args()
     if args.effect_threshold is not None and args.effect_threshold_mode != "fixed":
         raise ValueError("--effect-threshold requires --effect-threshold-mode=fixed.")
+    if args.grid_center_min >= args.grid_center_max:
+        raise ValueError("--grid-center-min must be less than --grid-center-max.")
     args.parent_grid = _parse_grid_tokens(args.parent_grid, int)
     args.graph_grid = _parse_grid_tokens(args.graph_grid, float)
     args.sparse_fraction_grid = _parse_grid_tokens(args.sparse_fraction_grid, float)
@@ -1135,9 +1179,26 @@ def main() -> None:
         gap_enforcement_mode=args.gap_enforcement_mode,
         max_rejection_attempts=args.max_rejection_attempts,
     )
+    center_algo_grids = bool(args.center_algo_grids_on_true_gaps)
+    if center_algo_grids and args.vary not in {"algo_eps", "algo_delta"}:
+        raise ValueError("--center-algo-grids-on-true-gaps requires --vary algo_eps or --vary algo_delta.")
+    enforce_gap_targets = not center_algo_grids
+    measure_gaps_flag = bool(args.measure_gaps or center_algo_grids)
     budget_warning_cache: set[Tuple[int, int]] = set()
     base_algo_eps = args.algo_eps
     base_algo_delta = args.algo_delta
+    algo_eps_template = (
+        list(map(float, args.algo_eps_grid))
+        if args.algo_eps_grid is not None
+        else list(map(float, grid_values("algo_eps", n=args.n, k=args.k)))
+    )
+    algo_delta_template = (
+        list(map(float, args.algo_delta_grid))
+        if args.algo_delta_grid is not None
+        else list(map(float, grid_values("algo_delta", n=args.n, k=args.k)))
+    )
+    eps_template_center = _grid_center(algo_eps_template, base_algo_eps)
+    delta_template_center = _grid_center(algo_delta_template, base_algo_delta)
     if args.vary == "parent_count" and args.parent_grid:
         knob_values = [int(value) for value in args.parent_grid]
     elif args.vary == "graph_density" and args.graph_grid:
@@ -1190,7 +1251,7 @@ def main() -> None:
     reuse_dir: Optional[Path] = args.reuse_trials
     cli_args_snapshot = vars(args).copy()
     prepared_cache: Dict[
-        Tuple[CausalBanditConfig, int, str, int, int, int, int],
+        Tuple[CausalBanditConfig, int, str, int, int, int, int, bool, bool],
         PreparedInstance,
     ] = {}
     cache_mode = args.sampler_cache
@@ -1301,28 +1362,6 @@ def main() -> None:
                     max_fillers=args.hybrid_max_fillers,
                     max_hybrid_arms=args.hybrid_max_hybrid_arms,
                 )
-                current_eps = float(base_algo_eps)
-                current_reward_delta = float(base_algo_delta)
-                if args.vary == "algo_eps":
-                    current_eps = float(knob_value)
-                elif args.vary == "algo_delta":
-                    current_reward_delta = float(knob_value)
-                raps_params_for_knob: Optional[RAPSParams] = None
-                if args.structure_backend == "budgeted_raps":
-                    raps_params_for_knob = RAPSParams(
-                        eps=current_eps,
-                        Delta=current_reward_delta,
-                        delta=args.raps_delta,
-                    )
-                    budget_B = compute_budget(int(cfg.n), int(cfg.ell), raps_params_for_knob)
-                    warning_key = (int(budget_B), int(current_horizon))
-                    if current_horizon <= budget_B and warning_key not in budget_warning_cache:
-                        print(
-                            f"[tau-study][warning] Horizon T={int(current_horizon)} is <= the Budgeted RAPS "
-                            f"observation budget B={budget_B} (eps={current_eps}, Delta={current_reward_delta}, "
-                            f"delta={args.raps_delta}). The algorithm will only issue observe actions."
-                        )
-                        budget_warning_cache.add(warning_key)
 
                 for tau in tau_iter:
                     for seed in seeds:
@@ -1334,13 +1373,70 @@ def main() -> None:
                             sampling.structure_mc_samples,
                             sampling.arm_mc_samples,
                             sampling.optimal_mean_mc_samples,
+                            enforce_gap_targets,
+                            measure_gaps_flag,
                         )
+                        prepared_instance = prepared_cache.get(cache_key)
+                        if prepared_instance is None:
+                            prepared_instance = prepare_instance(
+                                cfg,
+                                seed,
+                                enable_cache=cache_enabled,
+                                sampling=sampling,
+                                measure_gaps=measure_gaps_flag,
+                                enforce_gap_targets=enforce_gap_targets,
+                            )
+                            prepared_cache[cache_key] = prepared_instance
+
+                        diagnostics = prepared_instance.diagnostics or {}
+                        measured_eps = diagnostics.get("measured_epsilon")
+                        measured_delta = diagnostics.get("measured_delta")
+
+                        resolved_knob_value = float(knob_value)
+                        current_eps = float(base_algo_eps)
+                        current_reward_delta = float(base_algo_delta)
+                        if args.vary == "algo_eps":
+                            resolved_knob_value = _center_grid_value(
+                                float(knob_value),
+                                measured_eps,
+                                template_center=eps_template_center,
+                                lower=args.grid_center_min,
+                                upper=args.grid_center_max,
+                            ) if center_algo_grids else float(knob_value)
+                            current_eps = float(resolved_knob_value)
+                        elif args.vary == "algo_delta":
+                            resolved_knob_value = _center_grid_value(
+                                float(knob_value),
+                                measured_delta,
+                                template_center=delta_template_center,
+                                lower=args.grid_center_min,
+                                upper=args.grid_center_max,
+                            ) if center_algo_grids else float(knob_value)
+                            current_reward_delta = float(resolved_knob_value)
+
+                        raps_params_for_knob: Optional[RAPSParams] = None
+                        if args.structure_backend == "budgeted_raps":
+                            raps_params_for_knob = RAPSParams(
+                                eps=current_eps,
+                                Delta=current_reward_delta,
+                                delta=args.raps_delta,
+                            )
+                            budget_B = compute_budget(int(cfg.n), int(cfg.ell), raps_params_for_knob)
+                            warning_key = (int(budget_B), int(current_horizon))
+                            if current_horizon <= budget_B and warning_key not in budget_warning_cache:
+                                print(
+                                    f"[tau-study][warning] Horizon T={int(current_horizon)} is <= the Budgeted RAPS "
+                                    f"observation budget B={budget_B} (eps={current_eps}, Delta={current_reward_delta}, "
+                                    f"delta={args.raps_delta}). The algorithm will only issue observe actions."
+                                )
+                                budget_warning_cache.add(warning_key)
+
                         identity = make_trial_identity(
                             cfg,
                             horizon=current_horizon,
                             tau=float(tau),
                             seed=seed,
-                            knob_value=float(knob_value),
+                            knob_value=float(resolved_knob_value),
                             scheduler=args.scheduler,
                             structure_backend=args.structure_backend,
                             subset_size=subset_size,
@@ -1365,22 +1461,12 @@ def main() -> None:
                             summary = artifact.summary
                             optimal_mean = artifact.optimal_mean
                         else:
-                            prepared_instance = prepared_cache.get(cache_key)
-                            if prepared_instance is None:
-                                prepared_instance = prepare_instance(
-                                    cfg,
-                                    seed,
-                                    enable_cache=cache_enabled,
-                                    sampling=sampling,
-                                    measure_gaps=bool(args.measure_gaps),
-                                )
-                                prepared_cache[cache_key] = prepared_instance
                             record, summary, optimal_mean = run_trial(
                                 base_cfg=cfg,
                                 horizon=current_horizon,
                                 tau=tau,
                                 seed=seed,
-                                knob_value=float(knob_value),
+                                knob_value=float(resolved_knob_value),
                                 subset_size=subset_size,
                                 scheduler_mode=args.scheduler,
                                 use_full_budget=args.etc_use_full_budget,
@@ -1391,7 +1477,8 @@ def main() -> None:
                                 raps_params=raps_params_for_knob,
                                 arm_builder_cfg=arm_builder_cfg,
                                 prepared=prepared_instance,
-                                measure_gaps=bool(args.measure_gaps),
+                                measure_gaps=measure_gaps_flag,
+                                enforce_gap_targets=enforce_gap_targets,
                             )
 
                         scheduler_label = args.scheduler if args.structure_backend == "proxy" else "budgeted_raps"
@@ -1402,6 +1489,12 @@ def main() -> None:
                             horizon=current_horizon,
                             scheduler=scheduler_label,
                         )
+                        if center_algo_grids:
+                            record["algo_grid_centered_on_true_gaps"] = True
+                            record["algo_eps_template_center"] = eps_template_center
+                            record["algo_delta_template_center"] = delta_template_center
+                            record["resolved_algo_eps"] = current_eps
+                            record["resolved_algo_delta"] = current_reward_delta
 
                         if persist_dir is not None and ran_trial:
                             metadata = build_metadata(
@@ -1409,7 +1502,7 @@ def main() -> None:
                                     **cli_args_snapshot,
                                     "tau": float(tau),
                                     "seed": int(seed),
-                                    "knob_value": float(knob_value),
+                                    "knob_value": float(resolved_knob_value),
                                 }
                             )
                             trial_artifact = TrialArtifact(
@@ -1424,17 +1517,17 @@ def main() -> None:
                         results.append(record)
                         if timeline_dir is not None:
                             schedule = encode_schedule(summary.logs)
-                            key = (float(knob_value), float(tau))
+                            key = (float(resolved_knob_value), float(tau))
                             timeline_store[key].append((seed, schedule))
-                            per_seed_path = timeline_dir / f"timeline_knob-{_format_value(float(knob_value))}_tau-{_format_value(float(tau))}_seed-{seed}.png"
+                            per_seed_path = timeline_dir / f"timeline_knob-{_format_value(float(resolved_knob_value))}_tau-{_format_value(float(tau))}_seed-{seed}.png"
                             plot_time_allocation(
                                 schedule,
                                 per_seed_path,
-                                title=f"knob={_format_value(float(knob_value))}, tau={_format_value(float(tau))}, seed={seed}",
+                                title=f"knob={_format_value(float(resolved_knob_value))}, tau={_format_value(float(tau))}, seed={seed}",
                                 yticklabels=[f"seed {seed}"],
                                 max_columns=args.timeline_max_columns,
                             )
-                        progress.set_postfix(knob=knob_value, tau=tau, seed=seed)
+                        progress.set_postfix(knob=resolved_knob_value, tau=tau, seed=seed)
                         progress.update(1)
     finally:
         progress.close()
@@ -1465,9 +1558,12 @@ def main() -> None:
         for record in results:
             f.write(json.dumps(record) + "\n")
 
+    knob_values_for_output = knob_values
+    if center_algo_grids:
+        knob_values_for_output = sorted({float(rec["knob_value"]) for rec in results})
     tau_values = list(map(float, args.tau_grid))
-    matrix, std_matrix, counts = aggregate_heatmap_with_std(results, tau_values, knob_values, args.metric)
-    graph_success_matrix = aggregate_heatmap(results, tau_values, knob_values, "graph_success")
+    matrix, std_matrix, counts = aggregate_heatmap_with_std(results, tau_values, knob_values_for_output, args.metric)
+    graph_success_matrix = aggregate_heatmap(results, tau_values, knob_values_for_output, "graph_success")
     overlay_mask = graph_success_matrix >= OVERLAY_SUCCESS_THRESHOLD
     knob_label, knob_label_plural = KNOB_LABELS.get(
         args.vary, (args.vary.replace("_", " ").title(), f"{args.vary.replace('_', ' ')}s")
@@ -1479,7 +1575,7 @@ def main() -> None:
         json.dump(
             {
                 "tau_values": list(map(float, tau_values)),
-                "knob_values": list(map(float, knob_values)),
+                "knob_values": list(map(float, knob_values_for_output)),
                 "std": std_matrix.tolist(),
                 "mean": matrix.tolist(),
                 "counts": counts.astype(int).tolist(),
@@ -1489,7 +1585,7 @@ def main() -> None:
     plot_heatmap(
         matrix,
         tau_values=tau_values,
-        knob_values=knob_values,
+        knob_values=knob_values_for_output,
         title=f"{metric_label} for varying {knob_label_plural}",
         cbar_label=metric_label,
         x_label=knob_label,
@@ -1498,7 +1594,7 @@ def main() -> None:
     plot_heatmap(
         matrix,
         tau_values=tau_values,
-        knob_values=knob_values,
+        knob_values=knob_values_for_output,
         title=f"{metric_label} for varying {knob_label_plural} (structure overlay)",
         cbar_label=metric_label,
         x_label=knob_label,

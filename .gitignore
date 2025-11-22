@@ -1,6 +1,8 @@
 /examples/
 /tests/
 /results/
+/results_mod/
+/raps_tmp/
 /docs/
 perfcba.egg-info/
 
