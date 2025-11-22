@@ -43,7 +43,9 @@ class CausalBanditConfig:
     ell: int                   # domain size for each observed covariate
     k: int                     # number of reward parents
     m: int                     # maximum intervention size allowed to the learner
-    edge_prob: float = 0.3     # probability of an edge between covariates (respecting acyclicity)
+    edge_prob: float = 0.3     # baseline probability of an edge (default for both covariates and reward edges)
+    edge_prob_covariates: Optional[float] = None  # optional override for X->X density
+    edge_prob_to_reward: Optional[float] = None   # optional override for X->Y density
     reward_alpha: float = 2.0  # parameters of Beta prior for reward Bernoulli means
     reward_beta: float = 2.0
     reward_logit_scale: float = 1.0  # temperature for Bernoulli logits (controls variance)
@@ -53,6 +55,12 @@ class CausalBanditConfig:
     hard_margin: float = 0.0          # TV distance enforced between parent assignments
     scm_epsilon: float = 0.0          # lower bound enforced on every CPT entry
     scm_delta: float = 0.0            # tighter lower bound for reward CPT entries
+
+    # Reward heterogeneity controls
+    arm_heterogeneity_mode: str = "uniform"  # one of {"uniform", "sparse", "clustered"}
+    sparse_fraction: float = 0.1
+    sparse_separation: float = 0.3
+    cluster_count: int = 3
 
     def __post_init__(self) -> None:
         if self.n <= 0:
@@ -65,6 +73,10 @@ class CausalBanditConfig:
             raise ValueError("m must be between 0 and n")
         if not (0.0 <= self.edge_prob <= 1.0):
             raise ValueError("edge_prob must be in [0, 1]")
+        if self.edge_prob_covariates is not None and not (0.0 <= self.edge_prob_covariates <= 1.0):
+            raise ValueError("edge_prob_covariates must be in [0, 1] when provided")
+        if self.edge_prob_to_reward is not None and not (0.0 <= self.edge_prob_to_reward <= 1.0):
+            raise ValueError("edge_prob_to_reward must be in [0, 1] when provided")
         if self.reward_alpha <= 0 or self.reward_beta <= 0:
             raise ValueError("reward_alpha and reward_beta must be positive")
         if self.reward_logit_scale <= 0:
@@ -88,6 +100,14 @@ class CausalBanditConfig:
         max_reward_tv = 1.0 - 2.0 * reward_margin if reward_margin > 0.0 else 1.0
         if self.hard_margin - 1e-9 > max_reward_tv:
             raise ValueError("hard_margin is incompatible with scm_delta/scm_epsilon.")
+        if self.arm_heterogeneity_mode not in ("uniform", "sparse", "clustered"):
+            raise ValueError("arm_heterogeneity_mode must be one of {'uniform', 'sparse', 'clustered'}")
+        if not (0.0 < self.sparse_fraction <= 1.0):
+            raise ValueError("sparse_fraction must be in (0, 1]")
+        if not (0.0 < self.sparse_separation < 1.0):
+            raise ValueError("sparse_separation must be in (0, 1)")
+        if self.cluster_count < 1:
+            raise ValueError("cluster_count must be at least 1")
 
     def rng(self) -> np.random.Generator:
         """Return a generator seeded as requested (fresh instance each call)."""
@@ -502,6 +522,77 @@ def _apply_reward_logit_scale(
     return scaled
 
 
+def _sample_reward_cpt_sparse(
+    num_parents: int,
+    ell: int,
+    rng: np.random.Generator,
+    *,
+    sparse_fraction: float,
+    sparse_separation: float,
+    prob_margin: float,
+    reward_margin: float,
+    hard_margin: float,
+) -> Dict[Assignment, np.ndarray]:
+    """Generate reward CPT where only a small fraction of assignments differ markedly."""
+
+    assignments = list(_all_assignments(num_parents, ell))
+    base_mean = 0.5
+    base_std = 0.05
+    n_special = max(1, int(len(assignments) * sparse_fraction))
+    for _ in range(_HARD_MARGIN_MAX_ATTEMPTS):
+        special_idxs = set(rng.choice(len(assignments), size=n_special, replace=False).tolist())
+        table: Dict[Assignment, np.ndarray] = {}
+        for idx, assignment in enumerate(assignments):
+            if idx in special_idxs:
+                # Pull away from base_mean by at least sparse_separation (low or high).
+                if rng.random() < 0.5:
+                    low = max(0.01, base_mean - sparse_separation)
+                    p1 = rng.uniform(low, max(low, base_mean - 1e-3))
+                else:
+                    high = min(0.99, base_mean + sparse_separation)
+                    p1 = rng.uniform(min(high, base_mean + 1e-3), high)
+            else:
+                p1 = float(np.clip(rng.normal(base_mean, base_std), 0.01, 0.99))
+            probs = np.array([1.0 - p1, p1], dtype=float)
+            probs = _apply_probability_margin(probs, margin=prob_margin)
+            probs = _apply_probability_margin(probs, margin=reward_margin)
+            table[assignment] = probs
+        if _table_satisfies_margin(table, hard_margin):
+            return table
+    _force_margin_table(table, 2, max(prob_margin, reward_margin))
+    return table
+
+
+def _sample_reward_cpt_clustered(
+    num_parents: int,
+    ell: int,
+    rng: np.random.Generator,
+    *,
+    cluster_count: int,
+    prob_margin: float,
+    reward_margin: float,
+    hard_margin: float,
+) -> Dict[Assignment, np.ndarray]:
+    """Generate reward CPT with clusters of similar assignments at distinct mean levels."""
+
+    assignments = list(_all_assignments(num_parents, ell))
+    for _ in range(_HARD_MARGIN_MAX_ATTEMPTS):
+        centers = np.sort(rng.uniform(0.2, 0.8, size=cluster_count))
+        cluster_assignments = rng.integers(0, cluster_count, size=len(assignments))
+        table: Dict[Assignment, np.ndarray] = {}
+        for idx, assignment in enumerate(assignments):
+            center = float(centers[cluster_assignments[idx]])
+            p1 = float(np.clip(rng.normal(center, 0.03), 0.01, 0.99))
+            probs = np.array([1.0 - p1, p1], dtype=float)
+            probs = _apply_probability_margin(probs, margin=prob_margin)
+            probs = _apply_probability_margin(probs, margin=reward_margin)
+            table[assignment] = probs
+        if _table_satisfies_margin(table, hard_margin):
+            return table
+    _force_margin_table(table, 2, max(prob_margin, reward_margin))
+    return table
+
+
 def build_random_scm(config: CausalBanditConfig, *, rng: Optional[np.random.Generator] = None) -> CausalBanditInstance:
     """Construct a random SCM consistent with ``config``."""
 
@@ -513,27 +604,62 @@ def build_random_scm(config: CausalBanditConfig, *, rng: Optional[np.random.Gene
     parents: Dict[NodeName, List[NodeName]] = {name: [] for name in nodes}
 
     topo_order = _random_order(config.n, rng)
+    cov_density = config.edge_prob if config.edge_prob_covariates is None else config.edge_prob_covariates
     for position, dst_idx in enumerate(topo_order):
         dst_name = x_nodes[dst_idx]
         for src_idx in topo_order[:position]:
-            if rng.random() <= config.edge_prob:
+            if rng.random() <= cov_density:
                 parents[dst_name].append(x_nodes[src_idx])
 
-    reward_parent_indices = sorted(rng.choice(config.n, size=config.k, replace=False).tolist())
+    # Select reward parents; keep backwards-compatible default of exactly k parents.
+    reward_density = config.edge_prob if config.edge_prob_to_reward is None else config.edge_prob_to_reward
+    if config.edge_prob_to_reward is None:
+        reward_parent_indices = sorted(rng.choice(config.n, size=config.k, replace=False).tolist())
+    else:
+        candidates = [idx for idx in range(config.n) if rng.random() <= reward_density]
+        if len(candidates) < config.k:
+            remaining = [idx for idx in range(config.n) if idx not in candidates]
+            top_up = rng.choice(remaining, size=config.k - len(candidates), replace=False).tolist()
+            candidates.extend(top_up)
+        if len(candidates) > config.k:
+            candidates = rng.choice(candidates, size=config.k, replace=False).tolist()
+        reward_parent_indices = sorted(candidates)
     parents[reward_node] = [x_nodes[idx] for idx in reward_parent_indices]
 
     structural_functions: Dict[NodeName, Callable[[Dict[NodeName, int], np.random.Generator], int]] = {}
-    reward_table = _sample_reward_cpt(
-        config.k,
-        config.ell,
-        rng,
-        config.reward_alpha if config.scm_mode != "reference" else 1.0,
-        config.reward_beta if config.scm_mode != "reference" else 1.0,
-        mode=config.scm_mode,
-        hard_margin=config.hard_margin,
-        prob_margin=config.scm_epsilon,
-        reward_margin=config.scm_delta,
-    )
+    if config.arm_heterogeneity_mode == "sparse":
+        reward_table = _sample_reward_cpt_sparse(
+            config.k,
+            config.ell,
+            rng,
+            sparse_fraction=config.sparse_fraction,
+            sparse_separation=config.sparse_separation,
+            prob_margin=config.scm_epsilon,
+            reward_margin=config.scm_delta,
+            hard_margin=config.hard_margin,
+        )
+    elif config.arm_heterogeneity_mode == "clustered":
+        reward_table = _sample_reward_cpt_clustered(
+            config.k,
+            config.ell,
+            rng,
+            cluster_count=config.cluster_count,
+            prob_margin=config.scm_epsilon,
+            reward_margin=config.scm_delta,
+            hard_margin=config.hard_margin,
+        )
+    else:
+        reward_table = _sample_reward_cpt(
+            config.k,
+            config.ell,
+            rng,
+            config.reward_alpha if config.scm_mode != "reference" else 1.0,
+            config.reward_beta if config.scm_mode != "reference" else 1.0,
+            mode=config.scm_mode,
+            hard_margin=config.hard_margin,
+            prob_margin=config.scm_epsilon,
+            reward_margin=config.scm_delta,
+        )
     reward_table = _apply_reward_logit_scale(reward_table, logit_scale=config.reward_logit_scale)
 
     def make_node_fn(name: NodeName, parent_names: Sequence[NodeName], table: Dict[Assignment, np.ndarray], domain: int):
