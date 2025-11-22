@@ -342,6 +342,7 @@ def run_trial(
     raps_params: Optional[RAPSParams],
     arm_builder_cfg: Optional[HybridArmConfig] = None,
     prepared: Optional[PreparedInstance] = None,
+    measure_gaps: bool = False,
 ) -> Tuple[Dict[str, Any], RunSummary, float]:
     if prepared is not None:
         instance = prepared.instance
@@ -351,7 +352,11 @@ def run_trial(
         rng.bit_generator.state = copy.deepcopy(prepared.rng_state)
     else:
         rng = np.random.default_rng(seed)
-        instance, diagnostics = build_random_scm_with_gaps(base_cfg, rng=rng)
+        instance, diagnostics = build_random_scm_with_gaps(
+            base_cfg,
+            rng=rng,
+            measure_when_no_target=measure_gaps,
+        )
         optimal_mean = compute_optimal_mean(instance, rng, mc_samples=sampling.optimal_mean_mc_samples)
     if structure_backend == "budgeted_raps":
         if raps_params is None:
@@ -587,11 +592,16 @@ def prepare_instance(
     *,
     enable_cache: bool,
     sampling: SamplingSettings,
+    measure_gaps: bool,
 ) -> PreparedInstance:
     """Build the SCM, compute the optimal mean once, and record the RNG state."""
 
     rng = np.random.default_rng(seed)
-    instance, diagnostics = build_random_scm_with_gaps(cfg, rng=rng)
+    instance, diagnostics = build_random_scm_with_gaps(
+        cfg,
+        rng=rng,
+        measure_when_no_target=measure_gaps,
+    )
     sampler_cache = SamplerCache() if enable_cache else None
     if sampler_cache is not None:
         instance = dataclasses.replace(instance, sampler_cache=sampler_cache)
@@ -817,6 +827,12 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=128,
         help="Maximum attempts for gap-targeted SCM generation.",
+    )
+    parser.add_argument(
+        "--measure-gaps",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="If set, measure and log gaps even when target-epsilon/target-delta are not provided.",
     )
     parser.add_argument("--seeds", type=str, default="0:9", help="Seed range start:end.")
     parser.add_argument(
@@ -1351,13 +1367,14 @@ def main() -> None:
                         else:
                             prepared_instance = prepared_cache.get(cache_key)
                             if prepared_instance is None:
-                                prepared_instance = prepare_instance(
-                                    cfg,
-                                    seed,
-                                    enable_cache=cache_enabled,
-                                    sampling=sampling,
-                                )
-                                prepared_cache[cache_key] = prepared_instance
+                            prepared_instance = prepare_instance(
+                                cfg,
+                                seed,
+                                enable_cache=cache_enabled,
+                                sampling=sampling,
+                                measure_gaps=bool(args.measure_gaps),
+                            )
+                            prepared_cache[cache_key] = prepared_instance
                             record, summary, optimal_mean = run_trial(
                                 base_cfg=cfg,
                                 horizon=current_horizon,
@@ -1374,6 +1391,7 @@ def main() -> None:
                                 raps_params=raps_params_for_knob,
                                 arm_builder_cfg=arm_builder_cfg,
                                 prepared=prepared_instance,
+                                measure_gaps=bool(args.measure_gaps),
                             )
 
                         scheduler_label = args.scheduler if args.structure_backend == "proxy" else "budgeted_raps"

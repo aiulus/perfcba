@@ -138,6 +138,12 @@ def parse_args() -> argparse.Namespace:
         default=128,
         help="Maximum attempts for gap-targeted SCM generation.",
     )
+    parser.add_argument(
+        "--measure-gaps",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="If set, measure and log gaps even when target-epsilon/target-delta are not provided.",
+    )
     parser.add_argument("--T", type=int, default=10_000, help="Horizon length.")
     parser.add_argument("--tau", type=float, required=True, help="Tau budget for structure learning.")
     parser.add_argument("--knob-value", type=float, default=0.0, help="Metadata label recorded in artifacts.")
@@ -289,6 +295,7 @@ def ensure_artifacts(
             effect_threshold=effect_threshold,
             sampling=sampling,
             adaptive_config=adaptive_cfg,
+            measure_gaps=bool(cli_args_snapshot.get("measure_gaps", False)),
         )
         record = enrich_record_with_metadata(
             record,
