@@ -1405,13 +1405,19 @@ def main() -> None:
                         if args.vary == "algo_eps":
                             if dynamic_algo_eps_grid:
                                 base_value = measured_eps
-                                if base_value is None or math.isnan(float(base_value)):
+                                if (
+                                    base_value is None
+                                    or math.isnan(float(base_value))
+                                    or float(base_value) <= 0.0
+                                ):
                                     base_value = base_algo_eps
                                 base_value = float(base_value)
                                 raw_eps = float(knob_value) * base_value
                                 lower_bound = 0.25 * base_value
                                 upper_bound = 2.0 * base_value
-                                # Clamp only to the dynamic grid bounds derived from the measured epsilon.
+                                min_positive = 1e-12
+                                lower_bound = max(lower_bound, min_positive)
+                                # Clamp only to the dynamic grid bounds derived from the (positive) base epsilon.
                                 resolved_knob_value = float(min(upper_bound, max(lower_bound, raw_eps)))
                                 current_eps = resolved_knob_value
                             else:
