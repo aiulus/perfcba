@@ -69,6 +69,11 @@ class CausalBanditConfig:
     sparse_separation: float = 0.3
     cluster_count: int = 3
 
+    # Gap estimation controls
+    gap_strict: bool = True              # if True, use paper-faithful ancestor/reward-parent conditioning
+    gap_use_shrinkage: bool = False      # if True, apply Hoeffding shrinkage to MC estimates (lower-bounds)
+    gap_max_hops: Optional[int] = None   # optional cap on reward-parent subset size when estimating gaps
+
     def __post_init__(self) -> None:
         if self.n <= 0:
             raise ValueError("n must be positive")
@@ -243,6 +248,8 @@ class CausalBanditInstance:
         n_mc: int = 8000,
         alpha: float = 0.05,
         max_hops: Optional[int] = None,
+        strict: bool = True,
+        shrink: bool = False,
         rng: Optional[np.random.Generator] = None,
     ) -> "CausalBanditInstance.GapEstimates":
         """
@@ -254,7 +261,11 @@ class CausalBanditInstance:
         - Δ_hat: min over ancestors X of reward of |E[R|do(Z)] - E[R|do(Z,X)]|
 
         Exact evaluation is used when the intervention scope is small; otherwise
-        Monte Carlo sampling is applied with a conservative CI shrinkage.
+        Monte Carlo sampling is applied. When ``shrink`` is True, Hoeffding-style
+        shrinkage towards uniform is used to obtain conservative lower bounds.
+        ``strict=True`` follows the paper’s definition by conditioning only on
+        subsets of the reward-parent set; when False, the older “local parent”
+        conditioning is used for ε.
         """
 
         rng = rng or np.random.default_rng(self.config.seed)
@@ -304,13 +315,14 @@ class CausalBanditInstance:
                     draw = self.scm.sample(sample_rng, intervention=Intervention(name="do", hard=dict(assignment)))
                     counts[int(draw[node])] += 1.0
                 probs = counts / float(samples)
-                # Hoeffding-style shrinkage to get a conservative lower bound on diffs.
-                eps_ci = math.sqrt(0.5 * math.log(2.0 / alpha) / float(samples))
-                probs = np.clip(probs, 0.0, 1.0)
-                # This shrink stretches towards uniform; ensure a valid distribution.
-                probs = probs / probs.sum() if probs.sum() > 0 else probs
-                probs = np.clip(probs, eps_ci, 1.0)  # avoid zeros for downstream logics
-                probs = probs / probs.sum()
+                if shrink:
+                    # Hoeffding-style shrinkage to get a conservative lower bound on diffs.
+                    eps_ci = math.sqrt(0.5 * math.log(2.0 / alpha) / float(samples))
+                    probs = np.clip(probs, 0.0, 1.0)
+                    # This shrink stretches towards uniform; ensure a valid distribution.
+                    probs = probs / probs.sum() if probs.sum() > 0 else probs
+                    probs = np.clip(probs, eps_ci, 1.0)  # avoid zeros for downstream logics
+                    probs = probs / probs.sum()
 
             dist_cache[key] = probs
             return probs
@@ -331,41 +343,83 @@ class CausalBanditInstance:
                     for _ in range(samples)
                 ]
                 mean = float(np.mean(draws))
-                ci = math.sqrt(0.5 * math.log(2.0 / alpha) / float(samples))
-                value = max(0.0, min(1.0, mean - ci))
+                if shrink:
+                    ci = math.sqrt(0.5 * math.log(2.0 / alpha) / float(samples))
+                    value = max(0.0, min(1.0, mean - ci))
+                else:
+                    value = mean
             mean_cache[key] = value
             return value
 
         eps_candidates: List[float] = []
-        for child in self.node_names:
-            if child == self.reward_node:
-                continue
-            ancestors = _ancestors(child) - {child}
-            for ancestor in ancestors:
-                other_parents = [p for p in graph_parents.get(child, []) if p != ancestor]
-                for z_vals in _all_assignments(len(other_parents), self.config.ell):
-                    assignment = {name: val for name, val in zip(other_parents, z_vals)}
-                    base_probs = _sample_node_distribution(child, assignment, len(assignment))
-                    for x_val in range(self.config.ell):
-                        assignment[ancestor] = x_val
-                        inter_probs = _sample_node_distribution(child, assignment, len(assignment))
-                        diff = float(np.max(np.abs(base_probs - inter_probs)))
-                        eps_candidates.append(diff)
-                        assignment.pop(ancestor, None)
+        if strict:
+            reward_parent_set = set(self.reward_parents)
+            for child in self.node_names:
+                if child == self.reward_node:
+                    continue
+                for ancestor in _ancestors(child) - {child}:
+                    # Z ranges over subsets of reward parents excluding the intervened ancestor.
+                    eligible = [p for p in reward_parent_set if p != ancestor]
+                    max_subset = len(eligible) if max_hops is None else min(len(eligible), max_hops)
+                    for subset_size in range(0, max_subset + 1):
+                        for subset in itertools.combinations(eligible, subset_size):
+                            for z_vals in _all_assignments(len(subset), self.config.ell):
+                                assignment = {name: val for name, val in zip(subset, z_vals)}
+                                base_probs = _sample_node_distribution(child, assignment, len(assignment))
+                                for x_val in range(self.config.ell):
+                                    assignment[ancestor] = x_val
+                                    inter_probs = _sample_node_distribution(child, assignment, len(assignment))
+                                    diff = float(np.max(np.abs(base_probs - inter_probs)))
+                                    eps_candidates.append(diff)
+                                    assignment.pop(ancestor, None)
+        else:
+            for child in self.node_names:
+                if child == self.reward_node:
+                    continue
+                ancestors = _ancestors(child) - {child}
+                for ancestor in ancestors:
+                    other_parents = [p for p in graph_parents.get(child, []) if p != ancestor]
+                    for z_vals in _all_assignments(len(other_parents), self.config.ell):
+                        assignment = {name: val for name, val in zip(other_parents, z_vals)}
+                        base_probs = _sample_node_distribution(child, assignment, len(assignment))
+                        for x_val in range(self.config.ell):
+                            assignment[ancestor] = x_val
+                            inter_probs = _sample_node_distribution(child, assignment, len(assignment))
+                            diff = float(np.max(np.abs(base_probs - inter_probs)))
+                            eps_candidates.append(diff)
+                            assignment.pop(ancestor, None)
 
         delta_candidates: List[float] = []
         reward_parents = graph_parents[self.reward_node]
-        reward_ancestors = [a for a in _ancestors(self.reward_node) if a != self.reward_node]
-        for anc in reward_ancestors:
-            other = [p for p in reward_parents if p != anc]
-            for z_vals in _all_assignments(len(other), self.config.ell):
-                assignment = {name: val for name, val in zip(other, z_vals)}
-                base_mean = _sample_reward_mean(assignment, len(assignment))
-                for x_val in range(self.config.ell):
-                    assignment[anc] = x_val
-                    inter_mean = _sample_reward_mean(assignment, len(assignment))
-                    delta_candidates.append(abs(base_mean - inter_mean))
-                    assignment.pop(anc, None)
+        if strict:
+            reward_ancestors = set(_ancestors(self.reward_node)) - {self.reward_node}
+            # include reward parents themselves per the paper’s focus on ancestors of reward parents
+            reward_ancestors |= set(reward_parents)
+            for anc in reward_ancestors:
+                other = [p for p in self.reward_parents if p != anc]
+                max_subset = len(other) if max_hops is None else min(len(other), max_hops)
+                for subset_size in range(0, max_subset + 1):
+                    for subset in itertools.combinations(other, subset_size):
+                        for z_vals in _all_assignments(len(subset), self.config.ell):
+                            assignment = {name: val for name, val in zip(subset, z_vals)}
+                            base_mean = _sample_reward_mean(assignment, len(assignment))
+                            for x_val in range(self.config.ell):
+                                assignment[anc] = x_val
+                                inter_mean = _sample_reward_mean(assignment, len(assignment))
+                                delta_candidates.append(abs(base_mean - inter_mean))
+                                assignment.pop(anc, None)
+        else:
+            reward_ancestors = [a for a in _ancestors(self.reward_node) if a != self.reward_node]
+            for anc in reward_ancestors:
+                other = [p for p in reward_parents if p != anc]
+                for z_vals in _all_assignments(len(other), self.config.ell):
+                    assignment = {name: val for name, val in zip(other, z_vals)}
+                    base_mean = _sample_reward_mean(assignment, len(assignment))
+                    for x_val in range(self.config.ell):
+                        assignment[anc] = x_val
+                        inter_mean = _sample_reward_mean(assignment, len(assignment))
+                        delta_candidates.append(abs(base_mean - inter_mean))
+                        assignment.pop(anc, None)
 
         if not eps_candidates:
             raise ValueError("No epsilon candidates found when estimating ancestral gap; ensure the graph has ancestors.")
@@ -383,6 +437,8 @@ class CausalBanditInstance:
                 "n_mc": n_mc,
                 "alpha": alpha,
                 "max_hops": max_hops,
+                "strict": strict,
+                "shrink": shrink,
             },
         }
         return CausalBanditInstance.GapEstimates(eps=eps_hat, Delta=delta_hat, details=details)
@@ -743,7 +799,9 @@ def build_random_scm_with_gaps(
             max_parent_scope_exact=2,
             n_mc=8000,
             alpha=0.05,
-            max_hops=3,
+            max_hops=config.gap_max_hops,
+            strict=config.gap_strict,
+            shrink=config.gap_use_shrinkage,
             rng=rng,
         )
         return instance, {
@@ -765,7 +823,9 @@ def build_random_scm_with_gaps(
             max_parent_scope_exact=2,
             n_mc=8000,
             alpha=0.05,
-            max_hops=3,
+            max_hops=config.gap_max_hops,
+            strict=config.gap_strict,
+            shrink=config.gap_use_shrinkage,
             rng=rng,
         )
         measured_eps = float(gaps.eps)
