@@ -37,7 +37,7 @@ from .causal_envs import (
 )
 from .exploit import ArmBuilder, HybridArmConfig, ParentAwareUCB
 from .grids import TAU_GRID, grid_values
-from .heatmap import plot_heatmap
+from .heatmap import plot_heatmap, plot_line_with_band
 from .metrics import summarize
 from .scheduler import AdaptiveBurstConfig, RunSummary, RoundLog, build_scheduler
 from .timeline import encode_schedule, plot_time_allocation
@@ -1199,6 +1199,7 @@ def main() -> None:
     )
     eps_template_center = _grid_center(algo_eps_template, base_algo_eps)
     delta_template_center = _grid_center(algo_delta_template, base_algo_delta)
+    dynamic_algo_eps_grid = center_algo_grids and args.vary == "algo_eps" and args.algo_eps_grid is None
     if args.vary == "parent_count" and args.parent_grid:
         knob_values = [int(value) for value in args.parent_grid]
     elif args.vary == "graph_density" and args.graph_grid:
@@ -1211,8 +1212,14 @@ def main() -> None:
         knob_values = [int(value) for value in args.node_grid]
     elif args.vary == "intervention_size" and args.intervention_grid:
         knob_values = [int(value) for value in args.intervention_grid]
-    elif args.vary == "algo_eps" and args.algo_eps_grid:
-        knob_values = [float(value) for value in args.algo_eps_grid]
+    elif args.vary == "algo_eps":
+        if args.algo_eps_grid:
+            knob_values = [float(value) for value in args.algo_eps_grid]
+        elif dynamic_algo_eps_grid:
+            # Default centered grid uses measured epsilon: multipliers (0.25x .. 2x) applied after measurement.
+            knob_values = [i / 4.0 for i in range(1, 9)]
+        else:
+            knob_values = grid_values("algo_eps", n=args.n, k=args.k)
     elif args.vary == "algo_delta" and args.algo_delta_grid:
         knob_values = [float(value) for value in args.algo_delta_grid]
     elif args.vary == "arm_variance":
@@ -1396,14 +1403,24 @@ def main() -> None:
                         current_eps = float(base_algo_eps)
                         current_reward_delta = float(base_algo_delta)
                         if args.vary == "algo_eps":
-                            resolved_knob_value = _center_grid_value(
-                                float(knob_value),
-                                measured_eps,
-                                template_center=eps_template_center,
-                                lower=args.grid_center_min,
-                                upper=args.grid_center_max,
-                            ) if center_algo_grids else float(knob_value)
-                            current_eps = float(resolved_knob_value)
+                            if dynamic_algo_eps_grid:
+                                base_value = measured_eps
+                                if base_value is None or math.isnan(float(base_value)):
+                                    base_value = base_algo_eps
+                                raw_eps = float(knob_value) * float(base_value)
+                                resolved_knob_value = float(
+                                    min(args.grid_center_max, max(args.grid_center_min, raw_eps))
+                                )
+                                current_eps = resolved_knob_value
+                            else:
+                                resolved_knob_value = _center_grid_value(
+                                    float(knob_value),
+                                    measured_eps,
+                                    template_center=eps_template_center,
+                                    lower=args.grid_center_min,
+                                    upper=args.grid_center_max,
+                                ) if center_algo_grids else float(knob_value)
+                                current_eps = float(resolved_knob_value)
                         elif args.vary == "algo_delta":
                             resolved_knob_value = _center_grid_value(
                                 float(knob_value),
@@ -1601,6 +1618,26 @@ def main() -> None:
         output_path=args.output_dir / f"overlayed_heatmap_{args.metric}.png",
         overlay_mask=overlay_mask,
     )
+    if len(tau_values) == 1 and len(knob_values_for_output) > 1:
+        plot_line_with_band(
+            matrix[0, :],
+            std_matrix[0, :],
+            knob_values_for_output,
+            title=f"{metric_label} vs {knob_label}",
+            x_label=knob_label,
+            y_label=metric_label,
+            output_path=args.output_dir / f"line_{args.metric}_vs_{args.vary}.png",
+        )
+    elif len(knob_values_for_output) == 1 and len(tau_values) > 1:
+        plot_line_with_band(
+            matrix[:, 0],
+            std_matrix[:, 0],
+            tau_values,
+            title=f"{metric_label} vs tau",
+            x_label="Tau",
+            y_label=metric_label,
+            output_path=args.output_dir / f"line_{args.metric}_vs_tau.png",
+        )
 
 
 if __name__ == "__main__":

@@ -55,3 +55,31 @@ def plot_heatmap(
     fig.tight_layout()
     fig.savefig(output_path)
     plt.close(fig)
+
+
+def plot_line_with_band(
+    values: Sequence[float],
+    std: Sequence[float],
+    x_values: Sequence[float],
+    *,
+    title: str,
+    x_label: str,
+    y_label: str,
+    output_path: Path,
+    color: str = "tab:blue",
+) -> None:
+    """Plot a line with a shaded +/- std region."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    x = np.asarray(list(x_values), dtype=float)
+    y = np.asarray(list(values), dtype=float)
+    s = np.asarray(list(std), dtype=float)
+    fig, ax = plt.subplots(figsize=(6, 4))
+    ax.plot(x, y, color=color, label=y_label)
+    ax.fill_between(x, y - s, y + s, color=color, alpha=0.2, linewidth=0)
+    ax.set_xlabel(x_label)
+    ax.set_ylabel(y_label)
+    ax.set_title(title)
+    ax.grid(True, linestyle="--", alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(output_path)
+    plt.close(fig)
