@@ -1407,10 +1407,12 @@ def main() -> None:
                                 base_value = measured_eps
                                 if base_value is None or math.isnan(float(base_value)):
                                     base_value = base_algo_eps
-                                raw_eps = float(knob_value) * float(base_value)
-                                resolved_knob_value = float(
-                                    min(args.grid_center_max, max(args.grid_center_min, raw_eps))
-                                )
+                                base_value = float(base_value)
+                                raw_eps = float(knob_value) * base_value
+                                lower_bound = 0.25 * base_value
+                                upper_bound = 2.0 * base_value
+                                # Clamp only to the dynamic grid bounds derived from the measured epsilon.
+                                resolved_knob_value = float(min(upper_bound, max(lower_bound, raw_eps)))
                                 current_eps = resolved_knob_value
                             else:
                                 resolved_knob_value = _center_grid_value(
@@ -1579,6 +1581,22 @@ def main() -> None:
     if center_algo_grids:
         knob_values_for_output = sorted({float(rec["knob_value"]) for rec in results})
     tau_values = list(map(float, args.tau_grid))
+    measured_eps_values = [
+        float(rec["measured_epsilon"])
+        for rec in results
+        if rec.get("measured_epsilon") is not None and not math.isnan(float(rec["measured_epsilon"]))
+    ]
+    measured_eps_label = ""
+    if measured_eps_values:
+        eps_min = float(np.min(measured_eps_values))
+        eps_med = float(np.median(measured_eps_values))
+        eps_max = float(np.max(measured_eps_values))
+        if math.isclose(eps_min, eps_max):
+            measured_eps_label = f" (measured \u03b5={_format_value(eps_min)})"
+        else:
+            measured_eps_label = (
+                f" (measured \u03b5~[{_format_value(eps_min)}, {_format_value(eps_med)}, {_format_value(eps_max)}])"
+            )
     matrix, std_matrix, counts = aggregate_heatmap_with_std(results, tau_values, knob_values_for_output, args.metric)
     graph_success_matrix = aggregate_heatmap(results, tau_values, knob_values_for_output, "graph_success")
     overlay_mask = graph_success_matrix >= OVERLAY_SUCCESS_THRESHOLD
@@ -1603,7 +1621,7 @@ def main() -> None:
         matrix,
         tau_values=tau_values,
         knob_values=knob_values_for_output,
-        title=f"{metric_label} for varying {knob_label_plural}",
+        title=f"{metric_label} for varying {knob_label_plural}{measured_eps_label}",
         cbar_label=metric_label,
         x_label=knob_label,
         output_path=args.output_dir / f"heatmap_{args.metric}.png",
@@ -1612,7 +1630,7 @@ def main() -> None:
         matrix,
         tau_values=tau_values,
         knob_values=knob_values_for_output,
-        title=f"{metric_label} for varying {knob_label_plural} (structure overlay)",
+        title=f"{metric_label} for varying {knob_label_plural} (structure overlay){measured_eps_label}",
         cbar_label=metric_label,
         x_label=knob_label,
         output_path=args.output_dir / f"overlayed_heatmap_{args.metric}.png",
@@ -1623,7 +1641,7 @@ def main() -> None:
             matrix[0, :],
             std_matrix[0, :],
             knob_values_for_output,
-            title=f"{metric_label} vs {knob_label}",
+            title=f"{metric_label} vs {knob_label}{measured_eps_label}",
             x_label=knob_label,
             y_label=metric_label,
             output_path=args.output_dir / f"line_{args.metric}_vs_{args.vary}.png",
@@ -1633,7 +1651,7 @@ def main() -> None:
             matrix[:, 0],
             std_matrix[:, 0],
             tau_values,
-            title=f"{metric_label} vs tau",
+            title=f"{metric_label} vs tau{measured_eps_label}",
             x_label="Tau",
             y_label=metric_label,
             output_path=args.output_dir / f"line_{args.metric}_vs_tau.png",
