@@ -242,7 +242,7 @@ class CausalBanditInstance:
         max_parent_scope_exact: int = 2,
         n_mc: int = 8000,
         alpha: float = 0.05,
-        max_hops: int = 3,
+        max_hops: Optional[int] = None,
         rng: Optional[np.random.Generator] = None,
     ) -> "CausalBanditInstance.GapEstimates":
         """
@@ -340,27 +340,24 @@ class CausalBanditInstance:
         for child in self.node_names:
             if child == self.reward_node:
                 continue
-            for parent in graph_parents.get(child, []):
-                other_parents = [p for p in graph_parents[child] if p != parent]
-                if len(other_parents) > max_hops:
-                    continue
+            ancestors = _ancestors(child) - {child}
+            for ancestor in ancestors:
+                other_parents = [p for p in graph_parents.get(child, []) if p != ancestor]
                 for z_vals in _all_assignments(len(other_parents), self.config.ell):
                     assignment = {name: val for name, val in zip(other_parents, z_vals)}
                     base_probs = _sample_node_distribution(child, assignment, len(assignment))
                     for x_val in range(self.config.ell):
-                        assignment[parent] = x_val
+                        assignment[ancestor] = x_val
                         inter_probs = _sample_node_distribution(child, assignment, len(assignment))
                         diff = float(np.max(np.abs(base_probs - inter_probs)))
                         eps_candidates.append(diff)
-                        assignment.pop(parent, None)
+                        assignment.pop(ancestor, None)
 
         delta_candidates: List[float] = []
         reward_parents = graph_parents[self.reward_node]
         reward_ancestors = [a for a in _ancestors(self.reward_node) if a != self.reward_node]
         for anc in reward_ancestors:
             other = [p for p in reward_parents if p != anc]
-            if len(other) > max_hops:
-                continue
             for z_vals in _all_assignments(len(other), self.config.ell):
                 assignment = {name: val for name, val in zip(other, z_vals)}
                 base_mean = _sample_reward_mean(assignment, len(assignment))
@@ -370,8 +367,13 @@ class CausalBanditInstance:
                     delta_candidates.append(abs(base_mean - inter_mean))
                     assignment.pop(anc, None)
 
-        eps_hat = float(min(eps_candidates)) if eps_candidates else 0.0
-        delta_hat = float(min(delta_candidates)) if delta_candidates else 0.0
+        if not eps_candidates:
+            raise ValueError("No epsilon candidates found when estimating ancestral gap; ensure the graph has ancestors.")
+        if not delta_candidates:
+            raise ValueError("No delta candidates found when estimating reward gap; ensure the graph has reward ancestors.")
+
+        eps_hat = float(min(eps_candidates))
+        delta_hat = float(min(delta_candidates))
 
         details = {
             "eps_candidates": eps_candidates,
