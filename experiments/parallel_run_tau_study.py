@@ -358,7 +358,14 @@ def main() -> None:
     matrix, std_matrix, counts = aggregate_heatmap_with_std(records, tau_values, knob_values, args.metric)
     graph_success_matrix = np.zeros_like(matrix)
     overlay_mask = graph_success_matrix >= 0.5
-    report_heatmap_std(matrix, std_matrix, counts, metric_label=metric_label)
+    report_heatmap_std(
+        matrix,
+        std_matrix,
+        counts,
+        metric_label=metric_label,
+        tau_values=tau_values,
+        knob_values=knob_values,
+    )
     plot_heatmap(
         matrix,
         tau_values=tau_values,

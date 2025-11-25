@@ -570,29 +570,67 @@ def report_heatmap_std(
     counts: np.ndarray,
     *,
     metric_label: str,
+    tau_values: Optional[Sequence[float]] = None,
+    knob_values: Optional[Sequence[float]] = None,
 ) -> None:
     mask = counts > 0
     if not np.any(mask):
         return
-    avg_std = float(np.mean(std[mask]))
-    max_std = float(np.max(std[mask]))
-    reference = float(np.mean(np.abs(means[mask])))
-    reference = max(reference, 1e-8)
-    avg_ratio = avg_std / reference
-    max_ratio = max_std / reference
+    means_flat = means[mask]
+    std_flat = std[mask]
+    counts_flat = counts[mask]
+    total_n = int(np.sum(counts_flat))
+    avg_std = float(np.mean(std_flat))
+    weighted_mean = float(np.sum(means_flat * counts_flat) / max(1, total_n))
+    pooled_sumsq = float(np.sum((std_flat**2 + means_flat**2) * counts_flat))
+    pooled_var = max(0.0, pooled_sumsq / max(1, total_n) - weighted_mean**2)
+    pooled_std = float(math.sqrt(pooled_var))
+    ci_half = 1.96 * pooled_std / math.sqrt(max(total_n, 1))
+
+    # Coefficient of variation per cell (std/|mean|); ignore cells with ~0 mean.
+    cv = np.full_like(means, np.nan, dtype=np.float64)
+    valid_mean = np.abs(means) > 1e-12
+    cv[mask & valid_mean] = std[mask & valid_mean] / np.abs(means[mask & valid_mean])
+    finite_cv = np.isfinite(cv)
+    if np.any(finite_cv):
+        mean_cv = float(np.nanmean(cv))
+        max_cv = float(np.nanmax(cv))
+        max_cv_idx = np.unravel_index(int(np.nanargmax(cv)), cv.shape)
+    else:
+        mean_cv = math.nan
+        max_cv = math.nan
+        max_cv_idx = np.unravel_index(int(np.argmax(std)), std.shape)
+    max_cv_tau = tau_values[max_cv_idx[0]] if tau_values is not None else max_cv_idx[0]
+    max_cv_knob = knob_values[max_cv_idx[1]] if knob_values is not None else max_cv_idx[1]
+    max_cv_mean = float(means[max_cv_idx])
+    max_cv_std = float(std[max_cv_idx])
+    max_cv_count = int(counts[max_cv_idx])
+
+    min_count = int(np.min(counts_flat))
+    max_count = int(np.max(counts_flat))
+
+    mean_cv_display = "nan" if not math.isfinite(mean_cv) else f"{mean_cv:.1%}"
+    max_cv_display = "nan" if not math.isfinite(max_cv) else f"{max_cv:.1%}"
+
     print(
-        f"[tau-study] {metric_label}: mean std={avg_std:.4g} "
-        f"(avg ratio {avg_ratio:.1%}), max std={max_std:.4g} (ratio {max_ratio:.1%})"
+        f"[tau-study] {metric_label}: weighted mean={weighted_mean:.4g}, pooled std={pooled_std:.4g}, "
+        f"95% CI≈{weighted_mean:.4g} ± {ci_half:.4g} (n={total_n}, per-cell n=[{min_count}, {max_count}])"
     )
-    if avg_ratio > 0.10:
+    print(
+        f"[tau-study] Dispersion: mean std={avg_std:.4g}, mean CV={mean_cv_display}, "
+        f"max CV={max_cv_display} at tau={_format_value(float(max_cv_tau))}, "
+        f"knob={_format_value(float(max_cv_knob))} (n={max_cv_count}, mean={max_cv_mean:.4g}, std={max_cv_std:.4g})"
+    )
+    if math.isfinite(mean_cv) and mean_cv > 0.10:
         print(
-            f"[tau-study][warning] Average std for {metric_label} exceeds 10% of the mean "
-            f"(avg std {avg_std:.4g}, reference {reference:.4g})."
+            f"[tau-study][warning] Mean coefficient of variation for {metric_label} is {mean_cv:.1%} (>10%); "
+            "estimates are noisy relative to their means."
         )
-    if max_ratio > 0.20:
+    if math.isfinite(max_cv) and max_cv > 0.20:
         print(
-            f"[tau-study][warning] At least one cell has std above 20% of the mean "
-            f"(max std {max_std:.4g}, reference {reference:.4g})."
+            f"[tau-study][warning] Worst cell CV for {metric_label} is {max_cv:.1%} (>20%) at "
+            f"tau={_format_value(float(max_cv_tau))}, knob={_format_value(float(max_cv_knob))} "
+            f"(n={max_cv_count}, mean={max_cv_mean:.4g}, std={max_cv_std:.4g})."
         )
 
 
@@ -1610,7 +1648,14 @@ def main() -> None:
         args.vary, (args.vary.replace("_", " ").title(), f"{args.vary.replace('_', ' ')}s")
     )
     metric_label = METRIC_LABELS.get(args.metric, args.metric.replace("_", " ").capitalize())
-    report_heatmap_std(matrix, std_matrix, counts, metric_label=metric_label)
+    report_heatmap_std(
+        matrix,
+        std_matrix,
+        counts,
+        metric_label=metric_label,
+        tau_values=tau_values,
+        knob_values=knob_values_for_output,
+    )
     std_report_path = args.output_dir / f"heatmap_{args.metric}_std.json"
     with std_report_path.open("w", encoding="utf-8") as f:
         json.dump(
