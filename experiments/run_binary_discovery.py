@@ -371,7 +371,11 @@ def run_binary_trial(
         graph_cost_estimate=float(outcome.metadata.get("cost_estimate", math.nan)),
         decision_metadata=dict(outcome.metadata),
     )
-    metrics = summarize(summary.logs, optimal_mean)
+    metrics = summarize(
+        summary.logs,
+        optimal_mean,
+        opt_rate_n_mc=sampling.arm_mc_samples,
+    )
     parents_found = tuple(sorted(run_data.parent_set))
     true_parent_set = tuple(sorted(true_parents))
     intersection = set(parents_found) & set(true_parent_set)

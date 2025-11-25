@@ -149,7 +149,7 @@ def _budgeted_summary_from_trace(
 ) -> RunSummary:
     node_to_index = {name: idx for idx, name in enumerate(instance.node_names)}
     reward_index = node_to_index[instance.reward_node]
-    rng_means = np.random.default_rng(int(rng.integers(2**32 - 1)))
+    rng_means = rng
     mean_cache: Dict[ArmKey, float] = {}
 
     def mean_for_arm(arm: InterventionArm) -> float:
@@ -365,6 +365,9 @@ def run_trial(
     prepared: Optional[PreparedInstance] = None,
     measure_gaps: bool = False,
     enforce_gap_targets: bool = True,
+    opt_rate_epsilon: Optional[float] = None,
+    opt_rate_adaptive: bool = True,
+    opt_rate_debug: bool = False,
 ) -> Tuple[Dict[str, Any], RunSummary, float]:
     if prepared is not None:
         instance = prepared.instance
@@ -430,7 +433,44 @@ def run_trial(
             adaptive_config=adaptive_config,
         )
         summary = scheduler.run(rng)
-    metrics = summarize(summary.logs, optimal_mean)
+    metrics = summarize(
+        summary.logs,
+        optimal_mean,
+        opt_rate_epsilon=opt_rate_epsilon,
+        opt_rate_adaptive=opt_rate_adaptive,
+        opt_rate_n_mc=sampling.arm_mc_samples,
+    )
+    if opt_rate_debug:
+        intervention_logs = [log for log in summary.logs if log.arm.variables]
+        if intervention_logs:
+            diffs = [
+                abs(log.expected_mean - optimal_mean)
+                for log in intervention_logs
+                if math.isfinite(log.expected_mean)
+            ]
+            if diffs:
+                if opt_rate_epsilon is not None:
+                    eps_used = float(opt_rate_epsilon)
+                elif opt_rate_adaptive:
+                    eps_used = 3.0 * math.sqrt(2.0) * math.sqrt(0.25 / max(1, sampling.arm_mc_samples))
+                else:
+                    eps_used = 1e-3
+                print(
+                    "[opt-rate-debug]"
+                    f" interventions={len(intervention_logs)}/{len(summary.logs)},"
+                    f" eps_used={eps_used:.4f},"
+                    f" opt_rate={metrics.optimal_action_rate:.4f}"
+                )
+                print(
+                    "[opt-rate-debug]"
+                    f" diff min/med/max="
+                    f"{np.min(diffs):.4f}/{np.median(diffs):.4f}/{np.max(diffs):.4f}"
+                )
+                print(
+                    "[opt-rate-debug]"
+                    f" hit@0.01={sum(d < 0.01 for d in diffs)/len(diffs):.4f},"
+                    f" hit@0.05={sum(d < 0.05 for d in diffs)/len(diffs):.4f}"
+                )
     true_parent_set = tuple(sorted(instance.parent_indices()))
     found_parent_set = tuple(sorted(summary.final_parent_set))
     intersection = set(true_parent_set) & set(found_parent_set)
@@ -1108,6 +1148,24 @@ def parse_args() -> argparse.Namespace:
         default="cumulative_regret",
     )
     parser.add_argument(
+        "--opt-rate-epsilon",
+        type=float,
+        default=None,
+        help="Override epsilon tolerance for optimal action rate (defaults to adaptive based on MC samples).",
+    )
+    parser.add_argument(
+        "--opt-rate-adaptive",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Derive epsilon for optimal-rate metrics from MC standard error when not provided explicitly.",
+    )
+    parser.add_argument(
+        "--opt-rate-debug",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Print per-trial diagnostics for optimal action rate using intervention rounds only.",
+    )
+    parser.add_argument(
         "--hybrid-arms",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -1553,7 +1611,22 @@ def main() -> None:
                                 prepared=prepared_instance,
                                 measure_gaps=measure_gaps_flag,
                                 enforce_gap_targets=enforce_gap_targets,
+                                opt_rate_epsilon=args.opt_rate_epsilon,
+                                opt_rate_adaptive=args.opt_rate_adaptive,
+                                opt_rate_debug=args.opt_rate_debug,
                             )
+
+                        refreshed_metrics = summarize(
+                            summary.logs,
+                            optimal_mean,
+                            opt_rate_epsilon=args.opt_rate_epsilon,
+                            opt_rate_adaptive=args.opt_rate_adaptive,
+                            opt_rate_n_mc=sampling.arm_mc_samples,
+                        )
+                        record["cumulative_regret"] = refreshed_metrics.cumulative_regret
+                        record["tto"] = refreshed_metrics.time_to_optimality
+                        record["optimal_rate"] = refreshed_metrics.optimal_action_rate
+                        record["simple_regret"] = refreshed_metrics.simple_regret
 
                         scheduler_label = args.scheduler if args.structure_backend == "proxy" else "budgeted_raps"
                         record = enrich_record_with_metadata(

@@ -24,49 +24,99 @@ def cumulative_regret(logs: Sequence[RoundLog], optimal_mean: float) -> float:
 def optimal_action_rate(
     logs: Sequence[RoundLog],
     optimal_mean: float,
-    epsilon: float = 1e-3,
+    *,
+    epsilon: float | None = None,
+    n_mc: int = 1024,
+    adaptive: bool = True,
 ) -> float:
-    if not logs:
+    # Consider only true interventions/exploitation rounds (non-empty arms).
+    intervention_logs = [entry for entry in logs if entry.arm.variables]
+    if not intervention_logs:
         return 0.0
-    hits = sum(1 for entry in logs if abs(entry.expected_mean - optimal_mean) <= epsilon)
-    return hits / len(logs)
+
+    def _resolve_epsilon() -> float:
+        if epsilon is not None:
+            return float(epsilon)
+        if adaptive:
+            # Approximate 3-sigma band for the difference of two independent Bernoulli means.
+            se = (0.25 / max(1, n_mc)) ** 0.5
+            return 3.0 * (2.0**0.5) * se
+        return 1e-3
+
+    eps = _resolve_epsilon()
+    hits = sum(1 for entry in intervention_logs if abs(entry.expected_mean - optimal_mean) <= eps)
+    return hits / len(intervention_logs)
 
 
 def time_to_optimality(
     logs: Sequence[RoundLog],
     optimal_mean: float,
     *,
-    epsilon: float = 0.01,
+    epsilon: float | None = 0.01,
+    adaptive: bool = True,
+    n_mc: int = 1024,
     window_fraction: float = 0.1,
     threshold: float = 0.9,
 ) -> int:
-    if not logs:
+    intervention_logs = [entry for entry in logs if entry.arm.variables]
+    if not intervention_logs:
         return 0
-    window = max(1, int(len(logs) * window_fraction))
-    for start in range(0, len(logs) - window + 1):
-        window_entries = logs[start : start + window]
-        hits = sum(1 for entry in window_entries if abs(entry.expected_mean - optimal_mean) <= epsilon)
+
+    def _resolve_epsilon() -> float:
+        if epsilon is not None:
+            return float(epsilon)
+        if adaptive:
+            se = (0.25 / max(1, n_mc)) ** 0.5
+            return 3.0 * (2.0**0.5) * se
+        return 1e-3
+
+    eps = _resolve_epsilon()
+    window = max(1, int(len(intervention_logs) * window_fraction))
+    for start in range(0, len(intervention_logs) - window + 1):
+        window_entries = intervention_logs[start : start + window]
+        hits = sum(1 for entry in window_entries if abs(entry.expected_mean - optimal_mean) <= eps)
         if hits / window >= threshold:
             return start + 1
-    return len(logs)
+    return len(intervention_logs)
 
 
 def simple_regret(logs: Sequence[RoundLog], optimal_mean: float) -> float:
-    if not logs:
+    intervention_logs = [entry for entry in logs if entry.arm.variables and math.isfinite(entry.expected_mean)]
+    if not intervention_logs:
         return float(optimal_mean)
-    best_played = max(
-        (entry.expected_mean for entry in logs if math.isfinite(entry.expected_mean)),
-        default=float("-inf"),
-    )
+    best_played = max((entry.expected_mean for entry in intervention_logs), default=float("-inf"))
     if best_played == float("-inf"):
         return float(optimal_mean)
     return max(0.0, optimal_mean - best_played)
 
 
-def summarize(logs: Sequence[RoundLog], optimal_mean: float) -> AggregateMetrics:
+def summarize(
+    logs: Sequence[RoundLog],
+    optimal_mean: float,
+    *,
+    opt_rate_epsilon: float | None = None,
+    opt_rate_adaptive: bool = True,
+    opt_rate_n_mc: int = 1024,
+    tto_window_fraction: float = 0.1,
+    tto_threshold: float = 0.9,
+) -> AggregateMetrics:
     return AggregateMetrics(
         cumulative_regret=cumulative_regret(logs, optimal_mean),
-        time_to_optimality=time_to_optimality(logs, optimal_mean),
-        optimal_action_rate=optimal_action_rate(logs, optimal_mean),
+        time_to_optimality=time_to_optimality(
+            logs,
+            optimal_mean,
+            epsilon=opt_rate_epsilon,
+            adaptive=opt_rate_adaptive,
+            n_mc=opt_rate_n_mc,
+            window_fraction=tto_window_fraction,
+            threshold=tto_threshold,
+        ),
+        optimal_action_rate=optimal_action_rate(
+            logs,
+            optimal_mean,
+            epsilon=opt_rate_epsilon,
+            adaptive=opt_rate_adaptive,
+            n_mc=opt_rate_n_mc,
+        ),
         simple_regret=simple_regret(logs, optimal_mean),
     )
