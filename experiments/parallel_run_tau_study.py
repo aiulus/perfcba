@@ -301,6 +301,7 @@ def main() -> None:
                         cfg=cfg,
                         horizon=current_horizon,
                         tau=tau,
+                        strict_tau=args.strict_tau,
                         seed=seed,
                         knob_value=float(knob_value),
                         subset_size=subset_size,

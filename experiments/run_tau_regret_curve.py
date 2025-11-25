@@ -192,6 +192,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--T", type=int, default=10_000, help="Horizon length.")
     parser.add_argument("--tau", type=float, required=True, help="Tau budget for structure learning.")
+    parser.add_argument(
+        "--strict-tau",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="If set, counts the initial observation budget B against the tau-constrained discovery budget.",
+    )
     parser.add_argument("--knob-value", type=float, default=0.0, help="Metadata label recorded in artifacts.")
     parser.add_argument("--seeds", type=str, default="0:9", help="Seed range start:end (inclusive).")
     parser.add_argument(
@@ -358,6 +364,7 @@ def ensure_artifacts(
             subset_size=subset_size,
             use_full_budget=use_full_budget,
             effect_threshold=effect_threshold,
+            strict_tau=args.strict_tau,
             min_samples=sampling.min_samples,
             adaptive_config=adaptive_cfg_dict,
             raps_params=dataclasses.asdict(raps_params_for_run) if raps_params_for_run is not None else None,
@@ -372,6 +379,7 @@ def ensure_artifacts(
             base_cfg=cfg,
             horizon=horizon,
             tau=tau,
+            strict_tau=args.strict_tau,
             seed=seed,
             knob_value=float(knob_value),
             subset_size=subset_size,

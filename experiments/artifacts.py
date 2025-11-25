@@ -47,6 +47,7 @@ class TrialIdentity:
     use_full_budget: bool
     effect_threshold: float
     min_samples: int
+    strict_tau: bool = False
     structure_backend: str = "proxy"
     adaptive_config: Optional[Dict[str, Any]] = None
     hybrid_config: Optional[Dict[str, Any]] = None
@@ -68,6 +69,7 @@ class TrialIdentity:
             "use_full_budget": self.use_full_budget,
             "effect_threshold": self.effect_threshold,
             "min_samples": self.min_samples,
+            "strict_tau": self.strict_tau,
             "adaptive_config": self.adaptive_config,
             "hybrid_config": self.hybrid_config,
             "raps_params": self.raps_params,
@@ -90,6 +92,7 @@ def make_trial_identity(
     use_full_budget: bool,
     effect_threshold: float,
     min_samples: int,
+    strict_tau: bool,
     adaptive_config: Optional[Dict[str, Any]],
     hybrid_config: Optional[Dict[str, Any]] = None,
     raps_params: Optional[Dict[str, Any]] = None,
@@ -109,6 +112,7 @@ def make_trial_identity(
         use_full_budget=bool(use_full_budget),
         effect_threshold=float(effect_threshold),
         min_samples=int(min_samples),
+        strict_tau=bool(strict_tau),
         adaptive_config=_serialize_adaptive_cfg(adaptive_config),
         hybrid_config=_serialize_adaptive_cfg(hybrid_config),
         raps_params=_serialize_adaptive_cfg(raps_params),

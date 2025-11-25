@@ -207,12 +207,22 @@ class RAPSStats:
 class RAPSUCB(CausalBanditAlg):
     """Randomized parent search algorithm + UCB."""
 
-    def __init__(self, eps: float, gap: float, delta: float, tau: float = 1.0, **kwargs: Union[int, float]) -> None:
+    def __init__(
+        self,
+        eps: float,
+        gap: float,
+        delta: float,
+        tau: float = 1.0,
+        *,
+        strict_tau: bool = False,
+        **kwargs: Union[int, float],
+    ) -> None:
         super().__init__(**kwargs)
         self.gap = float(gap)
         self.delta = float(delta)
         self.eps = float(eps)
         self.tau = max(0.0, min(1.0, float(tau)))
+        self.strict_tau = bool(strict_tau)
         self.budget = self.compute_budget(self.eps, self.gap, self.delta, self.num_nodes, self.domain_size)
         self.stats = RAPSStats(self.batch_size, self.num_nodes, self.reward_node)
         self.ucb: Optional[UCB] = None
@@ -249,7 +259,10 @@ class RAPSUCB(CausalBanditAlg):
         if horizon is None:
             self.structure_budget_cap = None
         else:
-            self.structure_budget_cap = max(0, floor(self.tau * horizon))
+            cap = floor(self.tau * horizon)
+            if self.strict_tau:
+                cap -= self.budget
+            self.structure_budget_cap = max(0, cap)
         self.structure_steps = 0
         self.discovery_active = True
         self._last_action = "observe"
@@ -628,6 +641,7 @@ def run_budgeted_raps(
     horizon: int,
     *,
     tau: float = 1.0,
+    strict_tau: bool = False,
     batch_size: int = 1,
     delta: Optional[float] = None,
 ) -> BudgetedRAPSResult:
@@ -647,6 +661,10 @@ def run_budgeted_raps(
         Fraction of the horizon allocated to structure discovery.  ``tau=1``
         recovers the original algorithm, ``tau=0`` disables structure steps after
         the initial observational budget is spent.
+    strict_tau:
+        If True, counts the initial observational budget ``B`` against the
+        tau-constrained discovery budget, leaving at most ``floor(tau*horizon)-B``
+        rounds for interventional structure steps.
     batch_size:
         Number of parallel samples drawn per round.  This mirrors the batch size
         used in the reference code and defaults to ``1`` for compatibility with
@@ -669,6 +687,7 @@ def run_budgeted_raps(
         gap=params.Delta,
         delta=params.delta if delta is None else delta,
         tau=tau,
+        strict_tau=strict_tau,
         num_nodes=adapter.num_nodes,
         reward_node=adapter.reward_index,
         domain_size=adapter.domain_size,

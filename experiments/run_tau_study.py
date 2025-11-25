@@ -350,6 +350,7 @@ def run_trial(
     base_cfg: CausalBanditConfig,
     horizon: int,
     tau: float,
+    strict_tau: bool,
     seed: int,
     knob_value: float,
     subset_size: int,
@@ -390,6 +391,7 @@ def run_trial(
             params=raps_params,
             horizon=horizon,
             tau=tau,
+            strict_tau=strict_tau,
             batch_size=1,
         )
         summary = _budgeted_summary_from_trace(result, instance, sampling, rng)
@@ -451,6 +453,7 @@ def run_trial(
         "horizon": horizon,
         "scheduler": "budgeted_raps" if structure_backend == "budgeted_raps" else scheduler_mode,
         "structure_backend": structure_backend,
+        "strict_tau": strict_tau,
         "graph_success": graph_success,
         "parent_precision": parent_precision,
         "parent_recall": parent_recall,
@@ -804,6 +807,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--T", type=int, default=10_000)
     parser.add_argument("--tau-grid", type=float, nargs="*", default=TAU_GRID)
+    parser.add_argument(
+        "--strict-tau",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="If set, counts the passive observation budget B against the tau-constrained discovery budget.",
+    )
     parser.add_argument(
         "--hard-margin",
         nargs="*",
@@ -1505,6 +1514,7 @@ def main() -> None:
                             subset_size=subset_size,
                             use_full_budget=args.etc_use_full_budget,
                             effect_threshold=effect_threshold_value,
+                            strict_tau=args.strict_tau,
                             min_samples=sampling.min_samples,
                             adaptive_config=adaptive_cfg_dict,
                             hybrid_config=dataclasses.asdict(arm_builder_cfg),
@@ -1528,6 +1538,7 @@ def main() -> None:
                                 base_cfg=cfg,
                                 horizon=current_horizon,
                                 tau=tau,
+                                strict_tau=args.strict_tau,
                                 seed=seed,
                                 knob_value=float(resolved_knob_value),
                                 subset_size=subset_size,
