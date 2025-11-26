@@ -352,6 +352,7 @@ class CausalBanditInstance:
             return value
 
         eps_candidates: List[float] = []
+        eps_missing = False
         if strict:
             reward_parent_set = set(self.reward_parents)
             for child in self.node_names:
@@ -390,6 +391,7 @@ class CausalBanditInstance:
                             assignment.pop(ancestor, None)
 
         delta_candidates: List[float] = []
+        delta_missing = False
         reward_parents = graph_parents[self.reward_node]
         if strict:
             reward_ancestors = set(_ancestors(self.reward_node)) - {self.reward_node}
@@ -422,9 +424,13 @@ class CausalBanditInstance:
                         assignment.pop(anc, None)
 
         if not eps_candidates:
-            raise ValueError("No epsilon candidates found when estimating ancestral gap; ensure the graph has ancestors.")
+            # No ancestors in the graph; the tightest possible gap is zero.
+            eps_missing = True
+            eps_candidates.append(0.0)
         if not delta_candidates:
-            raise ValueError("No delta candidates found when estimating reward gap; ensure the graph has reward ancestors.")
+            # Should not happen because the reward has parents, but guard anyway.
+            delta_missing = True
+            delta_candidates.append(0.0)
 
         eps_hat = float(min(eps_candidates))
         delta_hat = float(min(delta_candidates))
@@ -441,6 +447,10 @@ class CausalBanditInstance:
                 "shrink": shrink,
             },
         }
+        if eps_missing:
+            details["eps_candidates_missing"] = True
+        if delta_missing:
+            details["delta_candidates_missing"] = True
         return CausalBanditInstance.GapEstimates(eps=eps_hat, Delta=delta_hat, details=details)
 
 

@@ -52,7 +52,7 @@ def time_to_optimality(
     logs: Sequence[RoundLog],
     optimal_mean: float,
     *,
-    epsilon: float | None = 0.01,
+    epsilon: float | None = None,
     adaptive: bool = True,
     n_mc: int = 1024,
     window_fraction: float = 0.1,
