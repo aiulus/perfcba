@@ -934,6 +934,12 @@ def parse_args() -> argparse.Namespace:
         help="Control acceptance when target gaps are not met: soft=accept with warning, hard=error after retries, reject=keep trying until max attempts then accept best.",
     )
     parser.add_argument(
+        "--gap-max-hops",
+        type=int,
+        default=None,
+        help="Optional cap on ancestor hop distance when estimating gap proxies; lower values reduce spurious zeros.",
+    )
+    parser.add_argument(
         "--max-rejection-attempts",
         type=int,
         default=128,
@@ -1282,6 +1288,7 @@ def main() -> None:
         target_epsilon=args.target_epsilon,
         target_delta=args.target_delta,
         gap_enforcement_mode=args.gap_enforcement_mode,
+        gap_max_hops=args.gap_max_hops,
         max_rejection_attempts=args.max_rejection_attempts,
     )
     center_algo_grids = bool(args.center_algo_grids_on_true_gaps)
