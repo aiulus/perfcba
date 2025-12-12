@@ -15,6 +15,7 @@ from tqdm.auto import tqdm
 
 from . import grids
 from .causal_envs import CausalBanditConfig
+from .baselines import estimate_observational_baseline
 from functools import partial
 
 from .parallel_utils import run_jobs_in_pool, run_trial_worker
@@ -367,6 +368,9 @@ def main() -> None:
         tau_values=tau_values,
         knob_values=knob_values,
     )
+    obs_baseline = estimate_observational_baseline(
+        records, args.metric, mc_samples=args.optimal_mean_mc_samples
+    )
     plot_heatmap(
         matrix,
         tau_values=tau_values,
@@ -375,6 +379,7 @@ def main() -> None:
         cbar_label=metric_label,
         x_label=knob_label,
         output_path=args.output_dir / f"heatmap_{args.metric}.png",
+        colorbar_marker=obs_baseline,
     )
     plot_heatmap(
         matrix,
@@ -385,6 +390,7 @@ def main() -> None:
         x_label=knob_label,
         output_path=args.output_dir / f"overlayed_heatmap_{args.metric}.png",
         overlay_mask=overlay_mask,
+        colorbar_marker=obs_baseline,
     )
 
 

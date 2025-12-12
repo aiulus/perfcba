@@ -7,6 +7,7 @@ from typing import Any, Dict, Optional, Sequence
 
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.transforms import blended_transform_factory
 
 
 def plot_heatmap(
@@ -20,6 +21,7 @@ def plot_heatmap(
     output_path: Path,
     overlay_mask: Optional[np.ndarray] = None,
     overlay_kwargs: Optional[Dict[str, Any]] = None,
+    colorbar_marker: Optional[float] = None,
 ) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig, ax = plt.subplots(figsize=(max(4, len(knob_values)), 6))
@@ -38,6 +40,25 @@ def plot_heatmap(
     ax.set_title(title)
     cbar = fig.colorbar(im, ax=ax)
     cbar.set_label(cbar_label)
+    if colorbar_marker is not None:
+        norm = im.norm
+        vmin = norm.vmin if norm is not None else float(np.nanmin(values))
+        vmax = norm.vmax if norm is not None else float(np.nanmax(values))
+        if np.isfinite(colorbar_marker) and np.isfinite(vmin) and np.isfinite(vmax):
+            clamped = float(np.clip(colorbar_marker, vmin, vmax))
+            transform = blended_transform_factory(cbar.ax.transAxes, cbar.ax.transData)
+            cbar.ax.scatter(
+                [1.12],
+                [clamped],
+                marker="<",
+                color="red",
+                edgecolors="black",
+                linewidths=0.6,
+                s=208,
+                transform=transform,
+                clip_on=False,
+                zorder=5,
+            )
     if overlay_mask is not None:
         if overlay_mask.shape != values.shape:
             raise ValueError("overlay_mask must have the same shape as values")

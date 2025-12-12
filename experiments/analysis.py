@@ -27,6 +27,8 @@ import logging
 
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.transforms import blended_transform_factory
+from .baselines import estimate_observational_baseline
 
 try:  # Optional – gradient smoothing and some stats use SciPy when available.
     from scipy import stats as scipy_stats
@@ -567,6 +569,7 @@ def plot_heatmap_with_annotations(
     x_label: str,
     output_path: Path,
     cmap: str = "viridis",
+    colorbar_marker: Optional[float] = None,
 ) -> Tuple[plt.Figure, plt.Axes]:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig, ax = plt.subplots(figsize=(max(4, len(knob_values)), 6))
@@ -586,6 +589,25 @@ def plot_heatmap_with_annotations(
     ax.set_title(title)
     cbar = fig.colorbar(im, ax=ax)
     cbar.set_label(metric_label)
+    if colorbar_marker is not None:
+        norm = im.norm
+        vmin = norm.vmin if norm is not None else float(np.nanmin(matrix))
+        vmax = norm.vmax if norm is not None else float(np.nanmax(matrix))
+        if np.isfinite(colorbar_marker) and np.isfinite(vmin) and np.isfinite(vmax):
+            clamped = float(np.clip(colorbar_marker, vmin, vmax))
+            transform = blended_transform_factory(cbar.ax.transAxes, cbar.ax.transData)
+            cbar.ax.scatter(
+                [1.12],
+                [clamped],
+                marker="<",
+                color="red",
+                edgecolors="black",
+                linewidths=0.6,
+                s=208,
+                transform=transform,
+                clip_on=False,
+                zorder=5,
+            )
 
     for j in range(matrix.shape[1]):
         column = matrix[:, j]
@@ -971,6 +993,7 @@ def main() -> None:
 
     line_series: List[Tuple[str, np.ndarray, np.ndarray, np.ndarray]] = []
     for metric in metrics_to_analyze:
+        obs_baseline = estimate_observational_baseline(loaded.records, metric)
         matrix, per_cell_samples, finished_rates = aggregate_matrix(
             loaded.records,
             loaded.tau_values,
@@ -1006,6 +1029,7 @@ def main() -> None:
                 metric_label=metric.replace("_", " ").title(),
                 x_label=args.vary.replace("_", " ").title(),
                 output_path=heatmap_path,
+                colorbar_marker=obs_baseline,
             )
             plot_gradient_flow(ax, grad_tau, grad_knob, ci=ci)
             fig.savefig(args.out_dir / f"flow_{metric}.png")

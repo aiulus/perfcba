@@ -37,6 +37,7 @@ from .causal_envs import (
 )
 from .exploit import ArmBuilder, HybridArmConfig, ParentAwareUCB
 from .grids import TAU_GRID, grid_values
+from .baselines import estimate_observational_baseline
 from .heatmap import plot_heatmap, plot_line_with_band
 from .metrics import summarize
 from .scheduler import AdaptiveBurstConfig, RunSummary, RoundLog, build_scheduler
@@ -1747,6 +1748,9 @@ def main() -> None:
         tau_values=tau_values,
         knob_values=knob_values_for_output,
     )
+    obs_baseline = estimate_observational_baseline(
+        results, args.metric, mc_samples=sampling.optimal_mean_mc_samples
+    )
     std_report_path = args.output_dir / f"heatmap_{args.metric}_std.json"
     with std_report_path.open("w", encoding="utf-8") as f:
         json.dump(
@@ -1767,6 +1771,7 @@ def main() -> None:
         cbar_label=metric_label,
         x_label=knob_label,
         output_path=args.output_dir / f"heatmap_{args.metric}.png",
+        colorbar_marker=obs_baseline,
     )
     plot_heatmap(
         matrix,
@@ -1777,6 +1782,7 @@ def main() -> None:
         x_label=knob_label,
         output_path=args.output_dir / f"overlayed_heatmap_{args.metric}.png",
         overlay_mask=overlay_mask,
+        colorbar_marker=obs_baseline,
     )
     if len(tau_values) == 1 and len(knob_values_for_output) > 1:
         plot_line_with_band(
