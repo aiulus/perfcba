@@ -1,8 +1,18 @@
+perfcba collects causal-bandit environments, policies, and experiment drivers used for the tau-scheduled study and budgeted RAPS baselines.
+
+## Core modules and capabilities
+
+- `Algorithm.py`, `Bandit.py`, `Experiment.py`, `Profiler.py`: lightweight harness for running bandit policies, logging histories, and computing regret curves.
+- `SCM.py`, `Graph.py`: structural causal models with random generation and optional visualization helpers (networkx/matplotlib only needed when drawing graphs).
+- `causal_bandits.py`, `budgeted_raps.py`, `backdoor_bandits.py`, `linear_bandits.py`, `classical_bandits.py`: reference implementations of causal and classical bandit algorithms, including the budgeted RAPS wrapper that mirrors the BorealisAI release.
+- `experiments/`: tau-study CLIs (serial + parallel), regret-curve driver, scheduler comparisons, binary-discovery probe, gap validation, plotting utilities, and analysis/report generation.
+- `estimators/`: observational estimators (propensity, outcome regression, DR variants) used by causal baselines.
+- `raps/`: vendored upstream RAPS implementation for compatibility tests.
 
 ## Installation
 
 - **Python:** 3.9+ (tested on CPython).
-- **Dependencies:** `numpy`, `tqdm`, `matplotlib`; `scipy` is optional but enables smoother gradients/statistics in the analysis CLI.
+- **Dependencies:** `numpy`, `tqdm`. Optional: `matplotlib` for plots, `scipy` for smoothed gradients/statistics in `experiments.analysis`, and `networkx` if you want to draw graphs from `Graph.py`.
 - **Editable install (recommended):**
 
   ```bash
@@ -11,6 +21,96 @@
   ```
 
 Run the commands below from the repository root (so `perfcba` is importable) or inside the environment created by the editable install.
+
+## CLI overview
+
+- Tau sweeps: `python -m perfcba.experiments.run_tau_study` (serial) or `python -m perfcba.experiments.parallel_run_tau_study` (multiprocess/thread) to sweep `--vary` and optional `--env-vary` knobs over tau budgets; accepts the full causal bandit configuration (graph density, parent count, intervention size, SCM mode, hard margins, reward variance settings, scheduler, and budgeted RAPS hyperparameters).
+- Post-processing: `python -m perfcba.experiments.analysis` renders heatmaps/line plots, gradient overlays, and regression tests from a `results.jsonl` produced by the sweep CLIs.
+- Regret curves: `python -m perfcba.experiments.run_tau_regret_curve` (and `parallel_run_tau_regret_curve`) generate classical regret trajectories for a fixed tau; `experiments/regret_curves.py` holds reusable plotting helpers.
+- Other probes: `python -m perfcba.experiments.compare_schedulers` (policy timing/quality comparison), `python -m perfcba.experiments.run_binary_discovery` (structure-discovery sanity check), `python -m perfcba.experiments.validate_gaps` / `analyze_gap_regret` (gap targeting audits), plus small plotting scripts under `scripts/`.
+- Legacy sweeps: the older parameter-sweep runner lives at `python -m perfcba.experiments_old.exp5_sweeps` (unstructured, linear, and causal baselines with PDF plots).
+
+## Reproducing the referenced report artifacts
+
+All commands assume repository root; adjust `--output-dir` paths to match your filesystem.
+
+- `report3/graph_density_underactuated/results.jsonl`:
+
+  ```bash
+  python -m perfcba.experiments.parallel_run_tau_study \
+    --vary graph_density --graph-grid 0:0.1:1 \
+    --tau-grid 0 0.2 0.4 0.6 0.8 0.95 \
+    --n 5 --ell 2 --k 3 --m 2 \
+    --algo-eps 0.35 --algo-delta 0.35 --raps-delta 0.2 \
+    --hard-margin 0.35 \
+    --seeds 0:19 \
+    --output-dir /mnt/c/Users/berki/Desktop/aybueke/idp_results/report3/graph_density_underactuated
+  ```
+
+- `report3/parent_count_tau_heatmap/results.jsonl`:
+
+  ```bash
+  python -m perfcba.experiments.parallel_run_tau_study \
+    --vary parent_count --parent-grid 1 2 3 --intervention-grid 1 2 3 \
+    --tau-grid 0 0.2 0.5 0.9 \
+    --n 5 --ell 2 --k 1 --m 1 \
+    --algo-eps 0.35 --algo-delta 0.35 --raps-delta 0.2 \
+    --hard-margin 0.35 \
+    --seeds 0:19 \
+    --output-dir /mnt/c/Users/berki/Desktop/aybueke/idp_results/report3/parent_count_tau_heatmap
+  ```
+
+- `report2/intervention_length_small/results.jsonl`:
+
+  ```bash
+  python -m perfcba.experiments.parallel_run_tau_study \
+    --vary intervention_size --intervention-grid 1 2 3 \
+    --tau-grid 0 0.2 0.5 0.9 \
+    --n 5 --ell 2 --k 3 --m 1 \
+    --algo-eps 0.35 --algo-delta 0.35 --raps-delta 0.05 \
+    --hard-margin 0.35 \
+    --seeds 0:19 \
+    --output-dir /mnt/c/Users/berki/Desktop/aybueke/idp_results/report2/intervention_length_small
+  ```
+
+- `report3/hard_margin_x_graph_density_v2/results.jsonl`:
+
+  ```bash
+  python -m perfcba.experiments.parallel_run_tau_study \
+    --vary hard_margin --hard-margin 0.1 0.2 0.3 0.5 \
+    --env-vary graph_density --env-grid 0:0.1:1 \
+    --tau-grid 0.9 \
+    --n 5 --ell 2 --k 3 --m 2 \
+    --algo-eps 0.35 --algo-delta 0.35 --raps-delta 0.2 \
+    --seeds 0:19 \
+    --output-dir /mnt/c/Users/berki/Desktop/aybueke/idp_results/report3/hard_margin_x_graph_density_v2
+  ```
+
+- `report3/hard_margin_x_parent_count_v2/results.jsonl`:
+
+  ```bash
+  python -m perfcba.experiments.parallel_run_tau_study \
+    --vary hard_margin --hard-margin 0.1 0.2 0.3 0.5 \
+    --env-vary parent_count --env-grid 1 2 3 \
+    --tau-grid 0.9 \
+    --n 5 --ell 2 --k 3 --m 2 \
+    --algo-eps 0.35 --algo-delta 0.35 --raps-delta 0.2 \
+    --seeds 0:19 \
+    --output-dir /mnt/c/Users/berki/Desktop/aybueke/idp_results/report3/hard_margin_x_parent_count_v2
+  ```
+
+- `report3/hard_margin_x_intervention_size_v2/results.jsonl`:
+
+  ```bash
+  python -m perfcba.experiments.parallel_run_tau_study \
+    --vary hard_margin --hard-margin 0.1 0.2 0.3 0.5 \
+    --env-vary intervention_size --env-grid 1 2 3 \
+    --tau-grid 0.9 \
+    --n 5 --ell 2 --k 3 --m 3 \
+    --algo-eps 0.35 --algo-delta 0.35 --raps-delta 0.2 \
+    --seeds 0:19 \
+    --output-dir /mnt/c/Users/berki/Desktop/aybueke/idp_results/report3/hard_margin_x_intervention_size_v2
+  ```
 
 ## Causal bandit utilities
 
@@ -175,14 +275,14 @@ Each run captures reproducibility breadcrumbs (CLI invocations, grids, bootstrap
 settings) inside `tests_<metric>.json`, which makes downstream reporting
 straightforward.
 
-## Experiment 5: Parameter Sweep Runner
+## Legacy Experiment 5: Parameter Sweep Runner
 
-`exp5_sweeps.py` provides a configurable CLI for running one-dimensional parameter sweeps across the unstructured, linear, and causal bandit suites described in the accompanying report. Each sweep executes the registered policies with a shared random seed list and stores both JSON summaries and PDF plots under `results/exp5_sweeps/<family>/` by default.
+`experiments_old/exp5_sweeps.py` provides a configurable CLI for running one-dimensional parameter sweeps across the unstructured, linear, and causal bandit suites described in the accompanying report. Each sweep executes the registered policies with a shared random seed list and stores both JSON summaries and PDF plots under `results/exp5_sweeps/<family>/` by default.
 
 ### Usage
 
 ```bash
-python -m experiments.exp5_sweeps <family> [options]
+python -m perfcba.experiments_old.exp5_sweeps <family> [options]
 ````
 
 Where `<family>` selects one of:
@@ -196,7 +296,7 @@ Where `<family>` selects one of:
 ### Unstructured bandits
 
 ```bash
-python -m experiments.exp5_sweeps unstructured [--sweeps ...]
+python -m perfcba.experiments_old.exp5_sweeps unstructured [--sweeps ...]
 ```
 
 * `--sweeps` (default: `sigma gap arms heavy drift`): names of the sweeps to execute.
@@ -211,7 +311,7 @@ Each sweep reports mean regret and 95% confidence intervals per policy; the JSON
 ### Linear bandits
 
 ```bash
-python -m experiments.exp5_sweeps linear [--sweeps ...]
+python -m perfcba.experiments_old.exp5_sweeps linear [--sweeps ...]
 ```
 
 * `--sweeps` (default: `sigma dimension conditioning signal misspec context`).
@@ -225,7 +325,7 @@ python -m experiments.exp5_sweeps linear [--sweeps ...]
 ### Causal bandits
 
 ```bash
-python -m experiments.exp5_sweeps causal [--sweeps ...]
+python -m perfcba.experiments_old.exp5_sweeps causal [--sweeps ...]
 ```
 
 * `--sweeps` (default: `confounding overlap backdoor noise misspec latent`).
